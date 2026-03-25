@@ -1357,11 +1357,6 @@ static const struct wl_registry_listener registry_listener = {
  * surfaces, initializes the event loop, and handles display dispatching.
  */
 int main() {
-    if (daemon(0, 0) == -1) {
-        perror("daemon");
-        exit(EXIT_FAILURE);
-    }
-
     signal(SIGCHLD, SIG_IGN);
     
     if (access("/usr/share/selkies/www/icon.png", F_OK) == 0) {
