@@ -264,19 +264,26 @@ cairo_surface_t* get_icon(const char *name) {
     glob_t g;
     
     const char *sys_patterns[] = {
-        "/usr/share/pixmaps/%s.{png,svg}",
-        "/usr/share/icons/hicolor/*/apps/%s.{png,svg}",
-        "/usr/share/icons/hicolor/*/apps/*/%s.{png,svg}",
-        "/usr/share/icons/Adwaita/*/apps/%s.{png,svg}",
-        "/usr/share/icons/Papirus/*/apps/%s.{png,svg}",
-        "/usr/share/icons/*/*/apps/%s.{png,svg}",
-        "/usr/share/icons/*/*/*/%s.{png,svg}",
+        "/usr/share/pixmaps/%s.png",
+        "/usr/share/pixmaps/%s.svg",
+        "/usr/share/icons/hicolor/*/apps/%s.png",
+        "/usr/share/icons/hicolor/*/apps/%s.svg",
+        "/usr/share/icons/hicolor/*/apps/*/%s.png",
+        "/usr/share/icons/hicolor/*/apps/*/%s.svg",
+        "/usr/share/icons/Adwaita/*/apps/%s.png",
+        "/usr/share/icons/Adwaita/*/apps/%s.svg",
+        "/usr/share/icons/Papirus/*/apps/%s.png",
+        "/usr/share/icons/Papirus/*/apps/%s.svg",
+        "/usr/share/icons/*/*/apps/%s.png",
+        "/usr/share/icons/*/*/apps/%s.svg",
+        "/usr/share/icons/*/*/*/%s.png",
+        "/usr/share/icons/*/*/*/%s.svg",
         NULL
     };
 
     for (int i = 0; sys_patterns[i] != NULL; i++) {
         snprintf(pattern, sizeof(pattern), sys_patterns[i], name);
-        if (glob(pattern, GLOB_BRACE | GLOB_NOSORT, NULL, &g) == 0) {
+        if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
             for (size_t j = 0; j < g.gl_pathc; j++) {
                 cairo_surface_t *surf = NULL;
                 if (strstr(g.gl_pathv[j], ".svg")) {
@@ -300,16 +307,20 @@ cairo_surface_t* get_icon(const char *name) {
     const char *home = getenv("HOME");
     if (home) {
         const char *user_patterns[] = {
-            "%s/.local/share/icons/hicolor/*/apps/%s.{png,svg}",
-            "%s/.local/share/icons/hicolor/*/apps/*/%s.{png,svg}",
-            "%s/.local/share/icons/*/*/apps/%s.{png,svg}",
-            "%s/.local/share/icons/*/*/*/%s.{png,svg}",
+            "%s/.local/share/icons/hicolor/*/apps/%s.png",
+            "%s/.local/share/icons/hicolor/*/apps/%s.svg",
+            "%s/.local/share/icons/hicolor/*/apps/*/%s.png",
+            "%s/.local/share/icons/hicolor/*/apps/*/%s.svg",
+            "%s/.local/share/icons/*/*/apps/%s.png",
+            "%s/.local/share/icons/*/*/apps/%s.svg",
+            "%s/.local/share/icons/*/*/*/%s.png",
+            "%s/.local/share/icons/*/*/*/%s.svg",
             NULL
         };
 
         for (int i = 0; user_patterns[i] != NULL; i++) {
             snprintf(pattern, sizeof(pattern), user_patterns[i], home, name);
-            if (glob(pattern, GLOB_BRACE | GLOB_NOSORT, NULL, &g) == 0) {
+            if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
                 for (size_t j = 0; j < g.gl_pathc; j++) {
                     cairo_surface_t *surf = NULL;
                     if (strstr(g.gl_pathv[j], ".svg")) {
@@ -1328,7 +1339,7 @@ static void registry_handler(
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 3);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        shm = wl_registry_bind(registry, id, &wl_shm_interface, 3);
+        shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         layer_shell = wl_registry_bind(
             registry, id, &zwlr_layer_shell_v1_interface, 1);
