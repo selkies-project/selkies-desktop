@@ -93,7 +93,7 @@ PersistentBuffer ui_buffer = {0};
 PersistentBuffer bg_buffer = {0};
 
 int width = 1920; 
-int current_height = 16384;
+int current_height = 4000;
 int output_scale = 1;
 
 bool menu_open = false;
@@ -1328,7 +1328,7 @@ static void registry_handler(
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 3);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
+        shm = wl_registry_bind(registry, id, &wl_shm_interface, 3);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         layer_shell = wl_registry_bind(
             registry, id, &zwlr_layer_shell_v1_interface, 1);
@@ -1382,7 +1382,7 @@ int main() {
         ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | 
         ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
         
-    zwlr_layer_surface_v1_set_size(layer_surface, 0, 16384); 
+    zwlr_layer_surface_v1_set_size(layer_surface, 0, 4000); 
     zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, PANEL_HEIGHT);
     zwlr_layer_surface_v1_add_listener(layer_surface, &layer_listener, NULL);
     
