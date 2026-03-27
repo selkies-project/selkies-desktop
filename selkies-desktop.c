@@ -11,7 +11,11 @@
 #include <signal.h>
 #include <math.h>
 #include <glob.h>
+#include <poll.h>
+#include <sys/inotify.h>
+#include <errno.h>
 #include <wayland-client.h>
+#include <wayland-cursor.h>
 #include <cairo/cairo.h>
 #include "wlr-layer-shell.h"
 #include "wlr-foreign-toplevel-management-unstable-v1.h"
@@ -24,6 +28,9 @@
 #define ICON_SIZE 16
 #define MAX_MENU_HEIGHT 600
 #define MAX_APPS 2048
+#define DESKTOP_ICON_SIZE 48
+#define DESKTOP_CELL_WIDTH 96
+#define DESKTOP_CELL_HEIGHT 104
 
 /**
  * @brief Represents a desktop application.
@@ -73,6 +80,12 @@ typedef struct {
 App apps[MAX_APPS];
 int app_count = 0;
 
+App desktop_apps[MAX_APPS];
+int desktop_app_count = 0;
+uint32_t last_click_time = 0;
+int last_clicked_desktop_index = -1;
+struct wl_surface *current_pointer_surface = NULL;
+
 Category categories[20];
 int category_count = 0;
 
@@ -89,6 +102,10 @@ struct zwlr_layer_surface_v1 *bg_layer_surface;
 struct wl_seat *default_seat = NULL;
 struct zwlr_foreign_toplevel_manager_v1 *toplevel_manager = NULL;
 
+struct wl_cursor_theme *cursor_theme = NULL;
+struct wl_cursor *default_cursor = NULL;
+struct wl_surface *cursor_surface = NULL;
+
 PersistentBuffer ui_buffer = {0};
 PersistentBuffer bg_buffer = {0};
 
@@ -98,6 +115,10 @@ int output_scale = 1;
 
 bool menu_open = false;
 bool configured = false; 
+
+int bg_width = 0;
+int bg_height = 0;
+void draw_bg();
 
 int cat_menu_height = 0;
 int app_menu_height = 0;
@@ -238,60 +259,125 @@ cairo_surface_t* load_svg_as_cairo_surface(const char *filepath, int size) {
  * @brief Locates and loads an icon by name or absolute path from system and user directories.
  * 
  * @param name The icon name or file path.
+ * @param size Target icon size.
  * @return cairo_surface_t* The loaded Cairo surface, or NULL if not found.
  */
-cairo_surface_t* get_icon(const char *name) {
+cairo_surface_t* get_icon(const char *name, int size) {
     if (!name || name[0] == '\0') {
         return NULL;
     }
     
     if (name[0] == '/') {
         if (access(name, F_OK) == 0) {
-            if (strstr(name, ".svg")) {
-                return load_svg_as_cairo_surface(name, ICON_SIZE);
-            } else if (strstr(name, ".png")) {
+            if (strstr(name, ".png")) {
                 cairo_surface_t *s = cairo_image_surface_create_from_png(name);
                 if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
                     return s;
                 }
                 cairo_surface_destroy(s);
+            } else if (strstr(name, ".svg")) {
+                return load_svg_as_cairo_surface(name, size);
             }
         }
         return NULL;
     }
 
-    char pattern[1024];
-    glob_t g;
-    
-    const char *sys_patterns[] = {
-        "/usr/share/pixmaps/%s.png",
-        "/usr/share/pixmaps/%s.svg",
-        "/usr/share/icons/hicolor/*/apps/%s.png",
-        "/usr/share/icons/hicolor/*/apps/%s.svg",
-        "/usr/share/icons/hicolor/*/apps/*/%s.png",
-        "/usr/share/icons/hicolor/*/apps/*/%s.svg",
-        "/usr/share/icons/Adwaita/*/apps/%s.png",
-        "/usr/share/icons/Adwaita/*/apps/%s.svg",
-        "/usr/share/icons/Papirus/*/apps/%s.png",
-        "/usr/share/icons/Papirus/*/apps/%s.svg",
-        "/usr/share/icons/*/*/apps/%s.png",
-        "/usr/share/icons/*/*/apps/%s.svg",
-        "/usr/share/icons/*/*/*/%s.png",
-        "/usr/share/icons/*/*/*/%s.svg",
-        NULL
+    const char *formats[] = { "svg", "png", NULL };
+    const char *sizes[] = {
+        "scalable", "512x512", "256x256", "192x192", "128x128", 
+        "96x96", "72x72", "64x64", "48x48", "36x36", "32x32", 
+        "24x24", "22x22", "16x16", "*", NULL
     };
 
-    for (int i = 0; sys_patterns[i] != NULL; i++) {
-        snprintf(pattern, sizeof(pattern), sys_patterns[i], name);
+    char pattern[1024];
+    glob_t g;
+    const char *home = getenv("HOME");
+
+    for (int f = 0; formats[f] != NULL; f++) {
+        for (int s = 0; sizes[s] != NULL; s++) {
+            const char *sys_patterns[] = {
+                "/usr/share/icons/hicolor/%s/apps/%s.%s",
+                "/usr/share/icons/hicolor/%s/apps/*/%s.%s",
+                "/usr/share/icons/Adwaita/%s/apps/%s.%s",
+                "/usr/share/icons/Papirus/%s/apps/%s.%s",
+                "/usr/share/icons/*/%s/apps/%s.%s",
+                "/usr/share/icons/*/%s/*/%s.%s",
+                NULL
+            };
+
+            for (int p = 0; sys_patterns[p] != NULL; p++) {
+                snprintf(pattern, sizeof(pattern), sys_patterns[p], sizes[s], 
+                         name, formats[f]);
+                if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
+                    for (size_t j = 0; j < g.gl_pathc; j++) {
+                        cairo_surface_t *surf = NULL;
+                        if (strcmp(formats[f], "svg") == 0) {
+                            surf = load_svg_as_cairo_surface(
+                                g.gl_pathv[j], size);
+                        } else {
+                            surf = cairo_image_surface_create_from_png(
+                                g.gl_pathv[j]);
+                        }
+                        if (surf && cairo_surface_status(surf) == 
+                            CAIRO_STATUS_SUCCESS) {
+                            globfree(&g);
+                            return surf;
+                        }
+                        if (surf) {
+                            cairo_surface_destroy(surf);
+                        }
+                    }
+                    globfree(&g);
+                }
+            }
+
+            if (home) {
+                const char *user_patterns[] = {
+                    "%s/.local/share/icons/hicolor/%s/apps/%s.%s",
+                    "%s/.local/share/icons/hicolor/%s/apps/*/%s.%s",
+                    "%s/.local/share/icons/*/%s/apps/%s.%s",
+                    "%s/.local/share/icons/*/%s/*/%s.%s",
+                    NULL
+                };
+
+                for (int p = 0; user_patterns[p] != NULL; p++) {
+                    snprintf(pattern, sizeof(pattern), user_patterns[p], home, 
+                             sizes[s], name, formats[f]);
+                    if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
+                        for (size_t j = 0; j < g.gl_pathc; j++) {
+                            cairo_surface_t *surf = NULL;
+                            if (strcmp(formats[f], "svg") == 0) {
+                                surf = load_svg_as_cairo_surface(
+                                    g.gl_pathv[j], size);
+                            } else {
+                                surf = cairo_image_surface_create_from_png(
+                                    g.gl_pathv[j]);
+                            }
+                            if (surf && cairo_surface_status(surf) == 
+                                CAIRO_STATUS_SUCCESS) {
+                                globfree(&g);
+                                return surf;
+                            }
+                            if (surf) {
+                                cairo_surface_destroy(surf);
+                            }
+                        }
+                        globfree(&g);
+                    }
+                }
+            }
+        }
+
+        snprintf(pattern, sizeof(pattern), "/usr/share/pixmaps/%s.%s", 
+                 name, formats[f]);
         if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
             for (size_t j = 0; j < g.gl_pathc; j++) {
                 cairo_surface_t *surf = NULL;
-                if (strstr(g.gl_pathv[j], ".svg")) {
-                    surf = load_svg_as_cairo_surface(g.gl_pathv[j], ICON_SIZE);
-                } else if (strstr(g.gl_pathv[j], ".png")) {
+                if (strcmp(formats[f], "svg") == 0) {
+                    surf = load_svg_as_cairo_surface(g.gl_pathv[j], size);
+                } else {
                     surf = cairo_image_surface_create_from_png(g.gl_pathv[j]);
                 }
-                
                 if (surf && cairo_surface_status(surf) == CAIRO_STATUS_SUCCESS) {
                     globfree(&g);
                     return surf;
@@ -304,55 +390,18 @@ cairo_surface_t* get_icon(const char *name) {
         }
     }
 
-    const char *home = getenv("HOME");
-    if (home) {
-        const char *user_patterns[] = {
-            "%s/.local/share/icons/hicolor/*/apps/%s.png",
-            "%s/.local/share/icons/hicolor/*/apps/%s.svg",
-            "%s/.local/share/icons/hicolor/*/apps/*/%s.png",
-            "%s/.local/share/icons/hicolor/*/apps/*/%s.svg",
-            "%s/.local/share/icons/*/*/apps/%s.png",
-            "%s/.local/share/icons/*/*/apps/%s.svg",
-            "%s/.local/share/icons/*/*/*/%s.png",
-            "%s/.local/share/icons/*/*/*/%s.svg",
-            NULL
-        };
-
-        for (int i = 0; user_patterns[i] != NULL; i++) {
-            snprintf(pattern, sizeof(pattern), user_patterns[i], home, name);
-            if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
-                for (size_t j = 0; j < g.gl_pathc; j++) {
-                    cairo_surface_t *surf = NULL;
-                    if (strstr(g.gl_pathv[j], ".svg")) {
-                        surf = load_svg_as_cairo_surface(
-                            g.gl_pathv[j], ICON_SIZE);
-                    } else if (strstr(g.gl_pathv[j], ".png")) {
-                        surf = cairo_image_surface_create_from_png(
-                            g.gl_pathv[j]);
-                    }
-                    
-                    if (surf && 
-                        cairo_surface_status(surf) == CAIRO_STATUS_SUCCESS) {
-                        globfree(&g);
-                        return surf;
-                    }
-                    if (surf) {
-                        cairo_surface_destroy(surf);
-                    }
-                }
-                globfree(&g);
-            }
-        }
-    }
-
     char lower_name[128];
     snprintf(lower_name, sizeof(lower_name), "%s", name);
+    bool changed = false;
     for(int i = 0; lower_name[i]; i++) {
-        lower_name[i] = tolower(lower_name[i]);
+        if (tolower(lower_name[i]) != lower_name[i]) {
+            lower_name[i] = tolower(lower_name[i]);
+            changed = true;
+        }
     }
     
-    if (strcmp(name, lower_name) != 0) {
-        return get_icon(lower_name);
+    if (changed) {
+        return get_icon(lower_name, size);
     }
 
     return NULL;
@@ -420,7 +469,7 @@ void scan_app_dir(const char *base_path) {
             continue;
         }
         
-        char path[1024];
+        char path[2048];
         snprintf(path, sizeof(path), "%s/%s", base_path, dir->d_name);
         
         FILE *f = fopen(path, "r");
@@ -453,18 +502,19 @@ void scan_app_dir(const char *base_path) {
                 icon_name[strcspn(icon_name, "\n")] = 0;
             } else if (strncmp(line, "Categories=", 11) == 0 && 
                        categories_str[0] == '\0') {
-                snprintf(categories_str, sizeof(categories_str), "%.255s", line + 11);
+                snprintf(categories_str, sizeof(categories_str), "%.255s", 
+                         line + 11);
                 categories_str[strcspn(categories_str, "\n")] = 0;
             }
         }
         fclose(f);
-        
+       
         if (!nodisplay && name[0] && exec[0]) {
             strcpy(apps[app_count].name, name);
             strcpy(apps[app_count].desktop_path, path);
-            apps[app_count].icon = get_icon(icon_name);
+            apps[app_count].icon = get_icon(icon_name, ICON_SIZE);
             
-            Category *app_cat = NULL;
+            Category *app_cat = NULL; 
             if (categories_str[0]) {
                 for (int i = 0; cat_map[i][0] != NULL; i++) {
                     if (strstr(categories_str, cat_map[i][0])) {
@@ -485,6 +535,59 @@ void scan_app_dir(const char *base_path) {
 }
 
 /**
+ * @brief Scans the user's Desktop directory for .desktop files.
+ */
+void load_desktop_apps() {
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char base_path[1024];
+    snprintf(base_path, sizeof(base_path), "%s/Desktop", home);
+    
+    DIR *d = opendir(base_path);
+    if (!d) return;
+    
+    struct dirent *dir;
+    while ((dir = readdir(d)) != NULL && desktop_app_count < MAX_APPS) {
+        if (!strstr(dir->d_name, ".desktop")) continue;
+        
+        char path[2048];
+        snprintf(path, sizeof(path), "%s/%s", base_path, dir->d_name);
+        
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        
+        char line[256];
+        char name[128] = {0};
+        char exec[256] = {0};
+        char icon_name[128] = {0};
+        
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "Name=", 5) == 0 && name[0] == '\0') {
+                snprintf(name, sizeof(name), "%.127s", line + 5);
+                name[strcspn(name, "\n")] = 0;
+            } else if (strncmp(line, "Exec=", 5) == 0 && exec[0] == '\0') {
+                snprintf(exec, sizeof(exec), "%.255s", line + 5);
+                exec[strcspn(exec, "\n")] = 0;
+                char *pct = strchr(exec, '%'); 
+                if (pct) *(pct - 1) = 0;
+            } else if (strncmp(line, "Icon=", 5) == 0 && icon_name[0] == '\0') {
+                snprintf(icon_name, sizeof(icon_name), "%.127s", line + 5);
+                icon_name[strcspn(icon_name, "\n")] = 0;
+            }
+        }
+        fclose(f);
+        if (name[0] && exec[0]) {
+            strcpy(desktop_apps[desktop_app_count].name, name);
+            strcpy(desktop_apps[desktop_app_count].desktop_path, path);
+            desktop_apps[desktop_app_count].icon = get_icon(
+                icon_name, DESKTOP_ICON_SIZE * 2);
+            desktop_app_count++;
+        }    
+    }
+    closedir(d);
+}
+
+/**
  * @brief Orchestrates application loading from all configured system and user directories.
  */
 void load_apps() {
@@ -493,7 +596,8 @@ void load_apps() {
     const char *home = getenv("HOME");
     if (home) {
         char user_path[1024];
-        snprintf(user_path, sizeof(user_path), "%s/.local/share/applications", home);
+        snprintf(user_path, sizeof(user_path), 
+                 "%s/.local/share/applications", home);
         scan_app_dir(user_path);
     }
 
@@ -600,7 +704,7 @@ static void toplevel_app_id(
     if (tl->icon) {
         cairo_surface_destroy(tl->icon);
     }
-    tl->icon = get_icon(app_id);
+    tl->icon = get_icon(app_id, ICON_SIZE);
     if (configured) {
         draw_frame();
     }
@@ -769,19 +873,13 @@ void rounded_rect(
 /**
  * @brief Configures and renders the background wallpaper layer surface.
  */
-static void bg_layer_surface_configure(
-    void *data, struct zwlr_layer_surface_v1 *layer, uint32_t serial,
-    uint32_t w, uint32_t h) {
-    zwlr_layer_surface_v1_ack_configure(layer, serial);
+void draw_bg() {
+    if (bg_width == 0 || bg_height == 0) return;
 
-    if (w == 0 || h == 0) {
-        return;
-    }
+    ensure_buffer(&bg_buffer, bg_width, bg_height, output_scale);
 
-    ensure_buffer(&bg_buffer, w, h, output_scale);
-
-    int buffer_w = w * output_scale;
-    int buffer_h = h * output_scale;
+    int buffer_w = bg_width * output_scale;
+    int buffer_h = bg_height * output_scale;
     int stride = buffer_w * 4;
 
     cairo_surface_t *cairo_surf = cairo_image_surface_create_for_data(
@@ -799,21 +897,164 @@ static void bg_layer_surface_configure(
         double icon_w = cairo_image_surface_get_width(start_icon);
         double icon_h = cairo_image_surface_get_height(start_icon);
         cairo_set_source_surface(
-            cr, start_icon, (w - icon_w) / 2.0, (h - icon_h) / 2.0);
+            cr, start_icon, (bg_width - icon_w) / 2.0, 
+            (bg_height - icon_h) / 2.0);
         cairo_paint(cr);
+    }
+
+    cairo_select_font_face(
+        cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    
+    int max_rows = (bg_height - PANEL_HEIGHT) / DESKTOP_CELL_HEIGHT;
+    if (max_rows < 1) max_rows = 1;
+    
+    for (int i = 0; i < desktop_app_count; i++) {
+        int col = i / max_rows;
+        int row = i % max_rows;
+        
+        double cell_x = col * DESKTOP_CELL_WIDTH + 10;
+        double cell_y = row * DESKTOP_CELL_HEIGHT + 10;
+
+        if (i == last_clicked_desktop_index) {
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.2);
+            rounded_rect(
+                cr, cell_x, cell_y, DESKTOP_CELL_WIDTH, DESKTOP_CELL_HEIGHT, 8.0);
+            cairo_fill(cr);
+        }
+        
+        if (desktop_apps[i].icon) {
+            double icon_w = cairo_image_surface_get_width(desktop_apps[i].icon);
+            double icon_h = cairo_image_surface_get_height(desktop_apps[i].icon);
+            double scale = (double)DESKTOP_ICON_SIZE / 
+                           (icon_w > icon_h ? icon_w : icon_h);
+            
+            double draw_x = cell_x + (DESKTOP_CELL_WIDTH - (icon_w * scale)) / 2.0;
+            double draw_y = cell_y + 5;
+            
+            cairo_save(cr);
+            cairo_translate(cr, draw_x, draw_y);
+            cairo_scale(cr, scale, scale);
+            cairo_set_source_surface(cr, desktop_apps[i].icon, 0, 0);
+            cairo_paint(cr);
+            cairo_restore(cr);
+        }
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
+        
+        char line1[256] = {0};
+        char line2[256] = {0};
+        char temp[256] = {0};
+        const char *name = desktop_apps[i].name;
+        cairo_text_extents_t extents;
+        cairo_text_extents(cr, name, &extents);
+        
+        double max_w = DESKTOP_CELL_WIDTH - 4.0;
+        
+        if (extents.width <= max_w) {
+            strcpy(line1, name);
+        } else {
+            int len = strlen(name);
+            int split_idx = -1;
+
+            for (int j = 0; j < len; j++) {
+                if (name[j] == ' ') {
+                    snprintf(temp, sizeof(temp), "%.*s", j, name);
+                    cairo_text_extents(cr, temp, &extents); 
+                    if (extents.width <= max_w) {
+                        split_idx = j;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            
+            if (split_idx != -1) {
+                snprintf(line1, sizeof(line1), "%.*s", split_idx, name);
+                line1[split_idx] = '\0';
+                
+                const char *rem = name + split_idx + 1;
+                cairo_text_extents(cr, rem, &extents);
+                
+                if (extents.width <= max_w) {
+                    strcpy(line2, rem);
+                } else {
+                    for (int j = strlen(rem); j >= 0; j--) {
+                        snprintf(temp, sizeof(temp), "%.*s...", j, rem);
+                        cairo_text_extents(cr, temp, &extents);
+                        if (extents.width <= max_w || j == 0) {
+                            strcpy(line2, temp);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for (int j = len; j >= 0; j--) {
+                    snprintf(temp, sizeof(temp), "%.*s...", j, name);
+                    cairo_text_extents(cr, temp, &extents);
+                    if (extents.width <= max_w || j == 0) {
+                        strcpy(line1, temp);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        cairo_save(cr);
+        cairo_rectangle(cr, cell_x, cell_y + DESKTOP_ICON_SIZE + 10, 
+                        DESKTOP_CELL_WIDTH, 40);
+        cairo_clip(cr);
+        
+        cairo_text_extents(cr, line1, &extents);
+        double text_x = cell_x + (DESKTOP_CELL_WIDTH - extents.width) / 2.0;
+        cairo_move_to(cr, text_x, cell_y + DESKTOP_ICON_SIZE + 22);
+        cairo_show_text(cr, line1);
+        
+        if (line2[0] != '\0') {
+            cairo_text_extents(cr, line2, &extents);
+            text_x = cell_x + (DESKTOP_CELL_WIDTH - extents.width) / 2.0;
+            cairo_move_to(cr, text_x, cell_y + DESKTOP_ICON_SIZE + 36);
+            cairo_show_text(cr, line2);
+        }
+        
+        cairo_restore(cr);
     }
 
     cairo_destroy(cr);
     cairo_surface_destroy(cairo_surf);
 
     struct wl_region *region = wl_compositor_create_region(compositor);
+    for (int i = 0; i < desktop_app_count; i++) {
+        int col = i / max_rows;
+        int row = i % max_rows;
+        int cell_x = col * DESKTOP_CELL_WIDTH + 10;
+        int cell_y = row * DESKTOP_CELL_HEIGHT + 10;
+        wl_region_add(
+            region, cell_x, cell_y, DESKTOP_CELL_WIDTH, DESKTOP_CELL_HEIGHT);
+    }
     wl_surface_set_input_region(bg_surface, region);
     wl_region_destroy(region);
 
     wl_surface_set_buffer_scale(bg_surface, output_scale);
     wl_surface_attach(bg_surface, bg_buffer.buffer, 0, 0);
-    wl_surface_damage(bg_surface, 0, 0, w, h);
+    wl_surface_damage(bg_surface, 0, 0, bg_width, bg_height);
     wl_surface_commit(bg_surface);
+}
+
+/**
+ * @brief Handles configuration events for the background layer surface.
+ */
+static void bg_layer_surface_configure(
+    void *data, struct zwlr_layer_surface_v1 *layer, uint32_t serial,
+    uint32_t w, uint32_t h) {
+    zwlr_layer_surface_v1_ack_configure(layer, serial);
+
+    if (w == 0 || h == 0) {
+        return;
+    }
+
+    bg_width = w;
+    bg_height = h;
+    draw_bg();
 }
 
 static const struct zwlr_layer_surface_v1_listener bg_layer_listener = { 
@@ -845,8 +1086,26 @@ void draw_frame() {
     cairo_rectangle(cr, 0, current_height - PANEL_HEIGHT, width, PANEL_HEIGHT);
     cairo_fill(cr);
 
-    int btn_width = 150;
+    int num_windows = 0;
+    Toplevel *tl_count = toplevels_head;
+    while (tl_count) {
+        if (!tl_count->closed) num_windows++;
+        tl_count = tl_count->next;
+    }
+
     int padding = 5;
+    int max_btn_width = 150;
+    int min_btn_width = ICON_SIZE + 10;
+    int btn_width = max_btn_width;
+
+    if (num_windows > 0) {
+        int available_space = width - START_BTN_WIDTH - padding - 
+                              (num_windows * padding);
+        btn_width = available_space / num_windows;
+        if (btn_width > max_btn_width) btn_width = max_btn_width;
+        if (btn_width < min_btn_width) btn_width = min_btn_width;
+    }
+
     int x_offset = START_BTN_WIDTH + padding;
 
     Toplevel *tl = toplevels_head;
@@ -880,26 +1139,30 @@ void draw_frame() {
             text_x_offset += ICON_SIZE + 5;
         }
 
-        cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 1.0);
-        cairo_select_font_face(
-            cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-        cairo_set_font_size(cr, 12);
-        
-        cairo_save(cr);
-        cairo_rectangle(cr, text_x_offset, current_height - PANEL_HEIGHT, 
-                        btn_width - (text_x_offset - x_offset) - 5, PANEL_HEIGHT);
-        cairo_clip(cr);
-        cairo_move_to(cr, text_x_offset, current_height - 10);
-        
-        const char *display_text = "Unknown";
-        if (tl->title[0] != '\0') {
-            display_text = tl->title;
-        } else if (tl->app_id[0] != '\0') {
-            display_text = tl->app_id;
+        double clip_width = btn_width - (text_x_offset - x_offset) - 5;
+        if (clip_width > 0) {
+            cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 1.0);
+            cairo_select_font_face(
+                cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, 
+                CAIRO_FONT_WEIGHT_NORMAL);
+            cairo_set_font_size(cr, 12);
+            
+            cairo_save(cr);
+            cairo_rectangle(cr, text_x_offset, current_height - PANEL_HEIGHT, 
+                            clip_width, PANEL_HEIGHT);
+            cairo_clip(cr);
+            cairo_move_to(cr, text_x_offset, current_height - 10);
+            
+            const char *display_text = "Unknown";
+            if (tl->title[0] != '\0') {
+                display_text = tl->title;
+            } else if (tl->app_id[0] != '\0') {
+                display_text = tl->app_id;
+            }
+            
+            cairo_show_text(cr, display_text);
+            cairo_restore(cr);
         }
-        
-        cairo_show_text(cr, display_text);
-        cairo_restore(cr);
 
         x_offset += btn_width + padding;
         tl = tl->next;
@@ -1011,7 +1274,8 @@ void draw_frame() {
 
                 int text_x = app_x + 10;
                 if (cat->apps[i]->icon) {
-                    draw_icon(cr, cat->apps[i]->icon, text_x, item_y + 7, ICON_SIZE);
+                    draw_icon(cr, cat->apps[i]->icon, text_x, item_y + 7, 
+                              ICON_SIZE);
                     text_x += ICON_SIZE + 10;
                 }
                 
@@ -1060,7 +1324,80 @@ static void pointer_button(
     double x = pos[0];
     double y = pos[1];
 
-    if (x < START_BTN_WIDTH && y > current_height - PANEL_HEIGHT) {
+    if (current_pointer_surface == bg_surface) {
+        int max_rows = (bg_height - PANEL_HEIGHT) / DESKTOP_CELL_HEIGHT;
+        if (max_rows < 1) max_rows = 1;
+        
+        int clicked_idx = -1;
+        for (int i = 0; i < desktop_app_count; i++) {
+            int col = i / max_rows;
+            int row = i % max_rows;
+            int cell_x = col * DESKTOP_CELL_WIDTH + 10;
+            int cell_y = row * DESKTOP_CELL_HEIGHT + 10;
+            if (x >= cell_x && x < cell_x + DESKTOP_CELL_WIDTH &&
+                y >= cell_y && y < cell_y + DESKTOP_CELL_HEIGHT) {
+                clicked_idx = i;
+                break;
+            }
+        }
+       
+        if (clicked_idx != -1) {
+            if (time - last_click_time < 300 && 
+                last_clicked_desktop_index == clicked_idx) {
+                if (fork() == 0) { 
+                    setsid(); 
+                    if (fork() == 0) {
+                        int fd = open("/dev/null", O_RDWR);
+                        if (fd >= 0) {
+                            dup2(fd, STDIN_FILENO);
+                            dup2(fd, STDOUT_FILENO);
+                            dup2(fd, STDERR_FILENO);
+                            if (fd > 2) close(fd);
+                        } 
+                        char *d_path = desktop_apps[clicked_idx].desktop_path;
+                        execlp("dex", "dex", d_path, NULL);
+                        execlp("gio", "gio", "launch", d_path, NULL);
+                        execlp("gtk-launch", "gtk-launch", d_path, NULL);
+                        exit(0);
+                    }
+                    exit(0);
+                }
+                last_click_time = 0;
+                last_clicked_desktop_index = -1;
+                draw_bg();
+            } else {
+                last_click_time = time;
+                if (last_clicked_desktop_index != clicked_idx) {
+                    last_clicked_desktop_index = clicked_idx;
+                    draw_bg();
+                }
+            }
+        } else {
+            last_click_time = time;
+            if (last_clicked_desktop_index != -1) {
+                last_clicked_desktop_index = -1;
+                draw_bg();
+            }
+        }
+
+        if (menu_open) {
+            menu_open = false;
+            hovered_category = -1;
+            hovered_app = -1;
+            update_menu_heights();
+            if (configured) {
+                draw_frame();
+            }
+        }
+        return;
+    }
+
+    if (last_clicked_desktop_index != -1) {
+        last_clicked_desktop_index = -1;
+        draw_bg();
+    }
+
+    if (x < START_BTN_WIDTH && y > current_height - PANEL_HEIGHT) { 
         menu_open = !menu_open;
         if (!menu_open) { 
             hovered_category = -1; 
@@ -1078,8 +1415,26 @@ static void pointer_button(
             update_menu_heights();
         }
         
-        int btn_width = 150;
+        int num_windows = 0;
+        Toplevel *tl_count = toplevels_head;
+        while (tl_count) {
+            if (!tl_count->closed) num_windows++;
+            tl_count = tl_count->next;
+        }
+
         int padding = 5;
+        int max_btn_width = 150;
+        int min_btn_width = ICON_SIZE + 10;
+        int btn_width = max_btn_width;
+
+        if (num_windows > 0) {
+            int available_space = width - START_BTN_WIDTH - padding - 
+                                  (num_windows * padding);
+            btn_width = available_space / num_windows;
+            if (btn_width > max_btn_width) btn_width = max_btn_width;
+            if (btn_width < min_btn_width) btn_width = min_btn_width;
+        }
+
         int click_x = x - START_BTN_WIDTH - padding;
         
         if (click_x >= 0) {
@@ -1191,7 +1546,7 @@ static void pointer_motion(
     
     bool needs_redraw = false;
 
-    if (menu_open) {
+    if (menu_open && current_pointer_surface == surface) {
         double mx = pos[0];
         double my = pos[1];
         
@@ -1248,7 +1603,7 @@ static void pointer_motion(
 static void pointer_axis(
     void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
     wl_fixed_t value) {
-    if (!menu_open || axis != 0) {
+    if (!menu_open || axis != 0 || current_pointer_surface != surface) {
         return;
     }
     
@@ -1290,9 +1645,48 @@ static void pointer_axis(
     }
 }
 
+/**
+ * @brief Handles pointer enter events, tracking active surfaces and setting the cursor.
+ */
+static void pointer_enter(
+    void *data, struct wl_pointer *pointer, uint32_t serial,
+    struct wl_surface *surf, wl_fixed_t surface_x, wl_fixed_t surface_y) {
+    current_pointer_surface = surf;
+    double *pos = data;
+    pos[0] = wl_fixed_to_double(surface_x);
+    pos[1] = wl_fixed_to_double(surface_y);
+
+    if (default_cursor && cursor_surface) {
+        struct wl_cursor_image *image = default_cursor->images[0];
+        struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
+        wl_pointer_set_cursor(
+            pointer, serial, cursor_surface, image->hotspot_x, 
+            image->hotspot_y);
+        wl_surface_attach(cursor_surface, buffer, 0, 0);
+        wl_surface_damage(
+            cursor_surface, 0, 0, image->width, image->height);
+        wl_surface_commit(cursor_surface);
+    }
+}
+
+/**
+ * @brief Handles pointer leave events, clearing hover and active states.
+ */
+static void pointer_leave(
+    void *data, struct wl_pointer *pointer, uint32_t serial,
+    struct wl_surface *surf) {
+    if (current_pointer_surface == surf) {
+        current_pointer_surface = NULL;
+    }
+    if (surf == bg_surface && last_clicked_desktop_index != -1) {
+        last_clicked_desktop_index = -1;
+        draw_bg();
+    }
+}
+
 static const struct wl_pointer_listener pointer_listener = {
-    .enter = (void*)pointer_motion, 
-    .leave = (void*)pointer_motion,
+    .enter = pointer_enter, 
+    .leave = pointer_leave,
     .motion = pointer_motion, 
     .button = pointer_button, 
     .axis = pointer_axis
@@ -1369,20 +1763,45 @@ static const struct wl_registry_listener registry_listener = {
  */
 int main() {
     signal(SIGCHLD, SIG_IGN);
-    
+   
     if (access("/usr/share/selkies/www/icon.png", F_OK) == 0) {
         start_icon = cairo_image_surface_create_from_png(
             "/usr/share/selkies/www/icon.png");
     }
 
     load_apps();
+    load_desktop_apps();
 
-    display = wl_display_connect(NULL);
+    display = wl_display_connect(NULL); 
     struct wl_registry *registry = wl_display_get_registry(display);
     wl_registry_add_listener(registry, &registry_listener, NULL);
     
     wl_display_roundtrip(display);
     wl_display_roundtrip(display);
+
+    cursor_surface = wl_compositor_create_surface(compositor);
+    const char *theme = getenv("XCURSOR_THEME");
+    const char *size_str = getenv("XCURSOR_SIZE");
+    int cursor_size = 24;
+    
+    if (size_str) {
+        cursor_size = atoi(size_str);
+        if (cursor_size <= 0) {
+            cursor_size = 24;
+        }
+    }
+    
+    cursor_theme = wl_cursor_theme_load(theme, cursor_size, shm);
+    if (cursor_theme) {
+        default_cursor = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
+        if (!default_cursor) {
+            default_cursor = wl_cursor_theme_get_cursor(
+                cursor_theme, "default");
+        }
+        if (!default_cursor) {
+            default_cursor = wl_cursor_theme_get_cursor(cursor_theme, "arrow");
+        }
+    }
 
     surface = wl_compositor_create_surface(compositor);
     layer_surface = zwlr_layer_shell_v1_get_layer_surface(
@@ -1416,7 +1835,80 @@ int main() {
         
     wl_surface_commit(bg_surface);
 
-    while (wl_display_dispatch(display) != -1) {}
+    int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    char watch_file[1024];
+    const char *home_dir = getenv("HOME");
+    if (home_dir) {
+        snprintf(watch_file, sizeof(watch_file), "%s/.config/panel-reload", 
+                 home_dir);
+        int fd = open(watch_file, O_CREAT | O_RDWR, 0644);
+        if (fd >= 0) close(fd);
+        inotify_add_watch(inotify_fd, watch_file, IN_ATTRIB | IN_MODIFY);
+    }
+
+    int wl_fd = wl_display_get_fd(display);
+    struct pollfd fds[2] = {
+        { .fd = wl_fd, .events = POLLIN },
+        { .fd = inotify_fd, .events = POLLIN }
+    };
+
+    while (1) {
+        while (wl_display_prepare_read(display) != 0) {
+            wl_display_dispatch_pending(display);
+        }
+        wl_display_flush(display);
+        
+        int ret = poll(fds, 2, -1);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                wl_display_cancel_read(display);
+                continue;
+            }
+            wl_display_cancel_read(display);
+            break;
+        }
+        
+        if (fds[0].revents & POLLIN) {
+            wl_display_read_events(display);
+            wl_display_dispatch_pending(display);
+        } else {
+            wl_display_cancel_read(display);
+        }
+        
+        if (fds[1].revents & POLLIN) {
+            char buf[4096] __attribute__ ((aligned(
+                __alignof__(struct inotify_event))));
+            while (read(inotify_fd, buf, sizeof(buf)) > 0) {}
+            
+            for (int i = 0; i < app_count; i++) {
+                if (apps[i].icon) cairo_surface_destroy(apps[i].icon);
+            }
+            for (int i = 0; i < desktop_app_count; i++) {
+                if (desktop_apps[i].icon) {
+                    cairo_surface_destroy(desktop_apps[i].icon);
+                }
+            }
+            
+            app_count = 0;
+            desktop_app_count = 0;
+            category_count = 0;
+            
+            load_apps();
+            load_desktop_apps();
+            
+            if (configured) {
+                draw_frame();
+                draw_bg();
+            }
+        }
+    }
+
+    if (cursor_theme) {
+        wl_cursor_theme_destroy(cursor_theme);
+    }
+    if (cursor_surface) {
+        wl_surface_destroy(cursor_surface);
+    }
 
     wl_display_disconnect(display);
     return 0;

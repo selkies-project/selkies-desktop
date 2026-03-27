@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -O3
-LDFLAGS = -lwayland-client -lcairo -lm
+LDFLAGS = -lwayland-client -lcairo -lm -lwayland-cursor
 TARGET = selkies-desktop
 SRC = selkies-desktop.c
 PROTO_SRC = wlr-layer-shell.c wlr-foreign-toplevel-management-unstable-v1.c xdg-shell-protocol.c
