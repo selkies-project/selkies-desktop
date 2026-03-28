@@ -269,15 +269,28 @@ cairo_surface_t* get_icon(const char *name, int size) {
     
     if (name[0] == '/') {
         if (access(name, F_OK) == 0) {
-            if (strstr(name, ".png")) {
+            if (strstr(name, ".svg")) {
+                return load_svg_as_cairo_surface(name, size);
+            } else {
                 cairo_surface_t *s = cairo_image_surface_create_from_png(name);
                 if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
                     return s;
                 }
                 cairo_surface_destroy(s);
-            } else if (strstr(name, ".svg")) {
-                return load_svg_as_cairo_surface(name, size);
             }
+        }
+        char path_with_ext[1024];
+        snprintf(path_with_ext, sizeof(path_with_ext), "%s.png", name);
+        if (access(path_with_ext, F_OK) == 0) {
+            cairo_surface_t *s = cairo_image_surface_create_from_png(path_with_ext);
+            if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
+                return s;
+            }
+            cairo_surface_destroy(s);
+        }
+        snprintf(path_with_ext, sizeof(path_with_ext), "%s.svg", name);
+        if (access(path_with_ext, F_OK) == 0) {
+            return load_svg_as_cairo_surface(path_with_ext, size);
         }
         return NULL;
     }
@@ -668,7 +681,7 @@ static void output_done(void *data, struct wl_output *wl_output) {}
  */
 static void output_scale_handler(
     void *data, struct wl_output *wl_output, int32_t factor) {
-    if (factor > output_scale) {
+    if (factor > 0) {
         output_scale = factor;
     }
 }
@@ -894,12 +907,16 @@ void draw_bg() {
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
     if (start_icon && cairo_surface_status(start_icon) == CAIRO_STATUS_SUCCESS) {
+        cairo_save(cr);
+        cairo_identity_matrix(cr);
         double icon_w = cairo_image_surface_get_width(start_icon);
         double icon_h = cairo_image_surface_get_height(start_icon);
         cairo_set_source_surface(
-            cr, start_icon, (bg_width - icon_w) / 2.0, 
-            (bg_height - icon_h) / 2.0);
+            cr, start_icon, (buffer_w - icon_w) / 2.0, 
+            (buffer_h - icon_h) / 2.0);
+            
         cairo_paint(cr);
+        cairo_restore(cr);
     }
 
     cairo_select_font_face(
@@ -1805,7 +1822,7 @@ int main() {
 
     surface = wl_compositor_create_surface(compositor);
     layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        layer_shell, surface, NULL, ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
+        layer_shell, surface, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, "panel");
     
     zwlr_layer_surface_v1_set_anchor(layer_surface, 
         ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | 
