@@ -101,6 +101,7 @@ struct wl_surface *bg_surface;
 struct zwlr_layer_surface_v1 *bg_layer_surface;
 struct wl_seat *default_seat = NULL;
 struct zwlr_foreign_toplevel_manager_v1 *toplevel_manager = NULL;
+uint32_t layer_shell_version = 1;
 
 struct wl_cursor_theme *cursor_theme = NULL;
 struct wl_cursor *default_cursor = NULL;
@@ -1327,6 +1328,16 @@ void draw_frame() {
 }
 
 /**
+ * @brief Updates the panel's layer dynamically based on menu state.
+ */
+void update_panel_layer() {
+    if (layer_shell_version >= 2 && layer_surface) {
+        zwlr_layer_surface_v1_set_layer(layer_surface, 
+            menu_open ? ZWLR_LAYER_SHELL_V1_LAYER_TOP : ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM);
+    }
+}
+
+/**
  * @brief Handles pointer button press events to manage menu interactions and 
  * window state toggling. Uses fallback execution strategies for desktop files.
  */
@@ -1399,6 +1410,7 @@ static void pointer_button(
 
         if (menu_open) {
             menu_open = false;
+            update_panel_layer();
             hovered_category = -1;
             hovered_app = -1;
             update_menu_heights();
@@ -1416,6 +1428,7 @@ static void pointer_button(
 
     if (x < START_BTN_WIDTH && y > current_height - PANEL_HEIGHT) { 
         menu_open = !menu_open;
+        update_panel_layer();
         if (!menu_open) { 
             hovered_category = -1; 
             hovered_app = -1; 
@@ -1531,7 +1544,8 @@ static void pointer_button(
                     }
                     exit(0);
                 }
-                menu_open = false; 
+                menu_open = false;
+                update_panel_layer(); 
                 hovered_category = -1;
                 hovered_app = -1;
                 update_menu_heights();
@@ -1541,6 +1555,7 @@ static void pointer_button(
             }
         } else if (!in_cat) {
             menu_open = false;
+            update_panel_layer();
             hovered_category = -1;
             hovered_app = -1;
             update_menu_heights();
@@ -1752,8 +1767,9 @@ static void registry_handler(
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
+        layer_shell_version = version < 4 ? version : 4;
         layer_shell = wl_registry_bind(
-            registry, id, &zwlr_layer_shell_v1_interface, 1);
+            registry, id, &zwlr_layer_shell_v1_interface, layer_shell_version);
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         default_seat = wl_registry_bind(registry, id, &wl_seat_interface, 1);
         wl_seat_add_listener(default_seat, &seat_listener, NULL);
