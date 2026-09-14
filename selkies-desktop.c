@@ -221,7 +221,13 @@ cairo_surface_t* load_svg_as_cairo_surface(const char *filepath, int size) {
                                  image->width : image->height);
 
     NSVGrasterizer *rast = nsvgCreateRasterizer();
-    unsigned char *img_data = malloc(size * size * 4);
+    unsigned char *img_data = malloc((size_t)size * size * 4);
+    if (!rast || !img_data) {
+        free(img_data);
+        if (rast) nsvgDeleteRasterizer(rast);
+        nsvgDelete(image);
+        return NULL;
+    }
 
     nsvgRasterize(rast, image, 0, 0, scale, img_data, size, size, size * 4);
 
