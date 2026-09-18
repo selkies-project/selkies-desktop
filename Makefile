@@ -1,15 +1,16 @@
 CC = gcc
 CFLAGS = -Wall -O3
-LDFLAGS = -lwayland-client -lcairo -lm -lwayland-cursor
+LDFLAGS = -lwayland-client -lwayland-cursor -lX11 -lXext -lcairo -lm
 TARGET = selkies-desktop
-SRC = selkies-desktop.c
+SRC = selkies-desktop.c apps.c ui.c backend-wayland.c backend-x11.c
+HDR = desktop.h
 PROTO_SRC = wlr-layer-shell.c wlr-foreign-toplevel-management-unstable-v1.c xdg-shell-protocol.c
 PROTO_HDR = $(PROTO_SRC:.c=.h)
 OBJ = $(SRC:.c=.o) $(PROTO_SRC:.c=.o)
 all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
-%.o: %.c $(PROTO_HDR)
+%.o: %.c $(PROTO_HDR) $(HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 wlr-layer-shell.h:
 	wayland-scanner client-header protocols/wlr-layer-shell-unstable-v1.xml $@
