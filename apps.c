@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -109,6 +110,309 @@ cairo_surface_t* load_svg_as_cairo_surface(const char *filepath, int size) {
 }
 
 /**
+ * @brief One XPM colour table entry, the pixel characters packed into an
+ * integer so the table can be sorted and binary searched per pixel.
+ */
+typedef struct {
+    uint32_t key;
+    uint32_t argb;
+} XpmColor;
+
+/**
+ * @brief Orders XPM colour table entries by their packed pixel characters.
+ *
+ * @param a First entry.
+ * @param b Second entry.
+ * @return int Negative, zero or positive as qsort and bsearch expect.
+ */
+static int xpm_color_cmp(const void *a, const void *b) {
+    uint32_t ka = ((const XpmColor *)a)->key;
+    uint32_t kb = ((const XpmColor *)b)->key;
+    return (ka > kb) - (ka < kb);
+}
+
+/**
+ * @brief Packs the characters of one XPM pixel into a single integer.
+ *
+ * @param chars Pointer to the pixel characters.
+ * @param cpp Characters per pixel, at most four.
+ * @return uint32_t The packed key.
+ */
+static uint32_t xpm_pack_key(const char *chars, int cpp) {
+    uint32_t key = 0;
+    for (int i = 0; i < cpp; i++) {
+        key = (key << 8) | (unsigned char)chars[i];
+    }
+    return key;
+}
+
+/**
+ * @brief Returns the next C string literal in an XPM buffer, skipping block
+ * comments, and terminates it in place so no copy is needed.
+ *
+ * @param cursor Read position, advanced past the returned string.
+ * @return char* Start of the string contents, or NULL when none remain.
+ */
+static char* xpm_next_string(char **cursor) {
+    char *p = *cursor;
+    while (*p) {
+        if (p[0] == '/' && p[1] == '*') {
+            char *end = strstr(p + 2, "*/");
+            if (!end) {
+                break;
+            }
+            p = end + 2;
+        } else if (*p == '"') {
+            char *start = ++p;
+            while (*p && *p != '"') {
+                p++;
+            }
+            if (!*p) {
+                break;
+            }
+            *p = '\0';
+            *cursor = p + 1;
+            return start;
+        } else {
+            p++;
+        }
+    }
+    *cursor = p + strlen(p);
+    return NULL;
+}
+
+/**
+ * @brief Ranks an XPM colour key so the colour visual wins over the grey and
+ * mono ones when a table line carries several.
+ *
+ * @param token A whitespace separated token from a colour line.
+ * @return int The rank of the key, or -1 if the token is not a key.
+ */
+static int xpm_key_rank(const char *token) {
+    if (strcmp(token, "c") == 0) return 4;
+    if (strcmp(token, "g") == 0) return 3;
+    if (strcmp(token, "g4") == 0) return 2;
+    if (strcmp(token, "m") == 0) return 1;
+    if (strcmp(token, "s") == 0) return 0;
+    return -1;
+}
+
+/**
+ * @brief Resolves an XPM colour value to a premultiplied ARGB pixel. Handles
+ * None, hex values of one to four digits per channel, a few common names and
+ * then the X11 rgb.txt database when it is installed. Unknown names fall back
+ * to opaque black.
+ *
+ * @param value The colour value text.
+ * @return uint32_t The ARGB pixel.
+ */
+static uint32_t xpm_resolve_color(const char *value) {
+    if (strcasecmp(value, "none") == 0) {
+        return 0;
+    }
+
+    if (value[0] == '#') {
+        size_t digits = strlen(value + 1) / 3;
+        if (digits >= 1 && digits <= 4 && strlen(value + 1) == digits * 3) {
+            uint32_t channels[3];
+            for (int i = 0; i < 3; i++) {
+                char part[5] = {0};
+                memcpy(part, value + 1 + i * digits, digits);
+                uint32_t v = (uint32_t)strtoul(part, NULL, 16);
+                channels[i] = digits == 1 ? v * 17 : v >> (4 * (digits - 2));
+            }
+            return 0xFF000000u | (channels[0] << 16) | (channels[1] << 8) |
+                   channels[2];
+        }
+        return 0xFF000000u;
+    }
+
+    static const struct { const char *name; uint32_t rgb; } named[] = {
+        {"black", 0x000000}, {"white", 0xFFFFFF}, {"red", 0xFF0000},
+        {"green", 0x00FF00}, {"blue", 0x0000FF}, {"yellow", 0xFFFF00},
+        {"cyan", 0x00FFFF}, {"magenta", 0xFF00FF}, {"gray", 0xBEBEBE},
+        {"grey", 0xBEBEBE}, {NULL, 0}
+    };
+    for (int i = 0; named[i].name != NULL; i++) {
+        if (strcasecmp(value, named[i].name) == 0) {
+            return 0xFF000000u | named[i].rgb;
+        }
+    }
+
+    uint32_t argb = 0xFF000000u;
+    FILE *fp = fopen("/usr/share/X11/rgb.txt", "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            unsigned int r, g, b;
+            char rgb_name[128];
+            if (sscanf(line, "%u %u %u %127[^\n]", &r, &g, &b,
+                       rgb_name) == 4 && strcasecmp(rgb_name, value) == 0) {
+                argb |= (r & 0xFF) << 16 | (g & 0xFF) << 8 | (b & 0xFF);
+                break;
+            }
+        }
+        fclose(fp);
+    }
+    return argb;
+}
+
+/**
+ * @brief Parses the part of an XPM colour line that follows the pixel
+ * characters. A line is a run of key and value pairs where a value may span
+ * several words, so tokens are gathered until the next key and the value of
+ * the highest ranked key is the one resolved.
+ *
+ * @param spec The mutable colour line text after the pixel characters.
+ * @return uint32_t The ARGB pixel.
+ */
+static uint32_t xpm_parse_color(char *spec) {
+    char value[64] = {0};
+    char best[64] = {0};
+    int rank = -1;
+    int best_rank = -1;
+    char *save = NULL;
+    char *token = strtok_r(spec, " \t", &save);
+
+    for (;;) {
+        int token_rank = token ? xpm_key_rank(token) : 0;
+        if (!token || token_rank >= 0) {
+            if (rank > best_rank && value[0] != '\0') {
+                snprintf(best, sizeof(best), "%s", value);
+                best_rank = rank;
+            }
+            if (!token) {
+                break;
+            }
+            rank = token_rank;
+            value[0] = '\0';
+        } else {
+            size_t used = strlen(value);
+            snprintf(value + used, sizeof(value) - used, "%s%s",
+                     used ? " " : "", token);
+        }
+        token = strtok_r(NULL, " \t", &save);
+    }
+
+    return best_rank > 0 ? xpm_resolve_color(best) : 0xFF000000u;
+}
+
+/**
+ * @brief Loads an XPM file into a Cairo surface at its native size. The file
+ * is read whole and walked as a sequence of string literals: the header, the
+ * colour table, then one string per pixel row. Pixels whose characters are
+ * missing from the table are left transparent.
+ *
+ * @param filepath Path to the XPM file.
+ * @return cairo_surface_t* The decoded image surface, or NULL on failure.
+ */
+static cairo_surface_t* load_xpm_as_cairo_surface(const char *filepath) {
+    FILE *fp = fopen(filepath, "rb");
+    if (!fp) {
+        return NULL;
+    }
+
+    char *buf = NULL;
+    XpmColor *colors = NULL;
+    cairo_surface_t *surf = NULL;
+    bool ok = false;
+
+    fseek(fp, 0, SEEK_END);
+    long len = ftell(fp);
+    rewind(fp);
+    if (len <= 0 || len > 16 * 1024 * 1024) {
+        goto done;
+    }
+    buf = malloc((size_t)len + 1);
+    if (!buf || fread(buf, 1, (size_t)len, fp) != (size_t)len) {
+        goto done;
+    }
+    buf[len] = '\0';
+
+    char *cursor = buf;
+    char *header = xpm_next_string(&cursor);
+    int w, h, ncolors, cpp;
+    if (!header || sscanf(header, "%d %d %d %d", &w, &h, &ncolors,
+                          &cpp) != 4 ||
+        w < 1 || w > 2048 || h < 1 || h > 2048 ||
+        ncolors < 1 || ncolors > 65536 || cpp < 1 || cpp > 4) {
+        goto done;
+    }
+
+    colors = malloc((size_t)ncolors * sizeof(XpmColor));
+    if (!colors) {
+        goto done;
+    }
+    for (int i = 0; i < ncolors; i++) {
+        char *line = xpm_next_string(&cursor);
+        if (!line || strlen(line) < (size_t)cpp) {
+            goto done;
+        }
+        colors[i].key = xpm_pack_key(line, cpp);
+        colors[i].argb = xpm_parse_color(line + cpp);
+    }
+    qsort(colors, (size_t)ncolors, sizeof(XpmColor), xpm_color_cmp);
+
+    surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    if (cairo_surface_status(surf) != CAIRO_STATUS_SUCCESS) {
+        goto done;
+    }
+    cairo_surface_flush(surf);
+    unsigned char *data = cairo_image_surface_get_data(surf);
+    int stride = cairo_image_surface_get_stride(surf);
+
+    for (int y = 0; y < h; y++) {
+        char *row = xpm_next_string(&cursor);
+        if (!row || strlen(row) < (size_t)w * cpp) {
+            goto done;
+        }
+        uint32_t *dst = (uint32_t *)(void *)(data + (size_t)y * stride);
+        for (int x = 0; x < w; x++) {
+            XpmColor probe = { xpm_pack_key(row + (size_t)x * cpp, cpp), 0 };
+            XpmColor *hit = bsearch(&probe, colors, (size_t)ncolors,
+                                    sizeof(XpmColor), xpm_color_cmp);
+            dst[x] = hit ? hit->argb : 0;
+        }
+    }
+    cairo_surface_mark_dirty(surf);
+    ok = true;
+
+done:
+    fclose(fp);
+    free(buf);
+    free(colors);
+    if (!ok && surf) {
+        cairo_surface_destroy(surf);
+        surf = NULL;
+    }
+    return surf;
+}
+
+/**
+ * @brief Loads an icon file with the decoder its extension calls for, PNG
+ * being the default.
+ *
+ * @param filepath Path to the icon file.
+ * @param size Target size, used by the SVG rasterizer only.
+ * @return cairo_surface_t* The loaded surface, or NULL on failure.
+ */
+static cairo_surface_t* load_icon_file(const char *filepath, int size) {
+    const char *ext = strrchr(filepath, '.');
+    if (ext && strcasecmp(ext, ".svg") == 0) {
+        return load_svg_as_cairo_surface(filepath, size);
+    }
+    if (ext && strcasecmp(ext, ".xpm") == 0) {
+        return load_xpm_as_cairo_surface(filepath);
+    }
+    cairo_surface_t *s = cairo_image_surface_create_from_png(filepath);
+    if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
+        return s;
+    }
+    cairo_surface_destroy(s);
+    return NULL;
+}
+
+/**
  * @brief Locates and loads an icon by name or absolute path from system and user directories.
  *
  * @param name The icon name or file path.
@@ -122,33 +426,36 @@ cairo_surface_t* get_icon(const char *name, int size) {
 
     if (name[0] == '/') {
         if (access(name, F_OK) == 0) {
-            if (strstr(name, ".svg")) {
-                return load_svg_as_cairo_surface(name, size);
-            } else {
-                cairo_surface_t *s = cairo_image_surface_create_from_png(name);
-                if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
-                    return s;
-                }
-                cairo_surface_destroy(s);
-            }
-        }
-        char path_with_ext[1024];
-        snprintf(path_with_ext, sizeof(path_with_ext), "%s.png", name);
-        if (access(path_with_ext, F_OK) == 0) {
-            cairo_surface_t *s = cairo_image_surface_create_from_png(path_with_ext);
-            if (cairo_surface_status(s) == CAIRO_STATUS_SUCCESS) {
+            cairo_surface_t *s = load_icon_file(name, size);
+            if (s) {
                 return s;
             }
-            cairo_surface_destroy(s);
         }
-        snprintf(path_with_ext, sizeof(path_with_ext), "%s.svg", name);
-        if (access(path_with_ext, F_OK) == 0) {
-            return load_svg_as_cairo_surface(path_with_ext, size);
+        const char *exts[] = { "png", "svg", "xpm", NULL };
+        char path_with_ext[1024];
+        for (int e = 0; exts[e] != NULL; e++) {
+            snprintf(path_with_ext, sizeof(path_with_ext), "%s.%s", name,
+                     exts[e]);
+            if (access(path_with_ext, F_OK) == 0) {
+                cairo_surface_t *s = load_icon_file(path_with_ext, size);
+                if (s) {
+                    return s;
+                }
+            }
         }
         return NULL;
     }
 
-    const char *formats[] = { "svg", "png", NULL };
+    const char *name_ext = strrchr(name, '.');
+    if (name_ext && (strcasecmp(name_ext, ".png") == 0 ||
+                     strcasecmp(name_ext, ".svg") == 0 ||
+                     strcasecmp(name_ext, ".xpm") == 0)) {
+        char base[128];
+        snprintf(base, sizeof(base), "%.*s", (int)(name_ext - name), name);
+        return get_icon(base, size);
+    }
+
+    const char *formats[] = { "svg", "png", "xpm", NULL };
     const char *sizes[] = {
         "scalable", "512x512", "256x256", "192x192", "128x128",
         "96x96", "72x72", "64x64", "48x48", "36x36", "32x32",
@@ -176,14 +483,8 @@ cairo_surface_t* get_icon(const char *name, int size) {
                          name, formats[f]);
                 if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
                     for (size_t j = 0; j < g.gl_pathc; j++) {
-                        cairo_surface_t *surf = NULL;
-                        if (strcmp(formats[f], "svg") == 0) {
-                            surf = load_svg_as_cairo_surface(
-                                g.gl_pathv[j], size);
-                        } else {
-                            surf = cairo_image_surface_create_from_png(
-                                g.gl_pathv[j]);
-                        }
+                        cairo_surface_t *surf = load_icon_file(
+                            g.gl_pathv[j], size);
                         if (surf && cairo_surface_status(surf) ==
                             CAIRO_STATUS_SUCCESS) {
                             globfree(&g);
@@ -211,14 +512,8 @@ cairo_surface_t* get_icon(const char *name, int size) {
                              sizes[s], name, formats[f]);
                     if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
                         for (size_t j = 0; j < g.gl_pathc; j++) {
-                            cairo_surface_t *surf = NULL;
-                            if (strcmp(formats[f], "svg") == 0) {
-                                surf = load_svg_as_cairo_surface(
-                                    g.gl_pathv[j], size);
-                            } else {
-                                surf = cairo_image_surface_create_from_png(
-                                    g.gl_pathv[j]);
-                            }
+                            cairo_surface_t *surf = load_icon_file(
+                                g.gl_pathv[j], size);
                             if (surf && cairo_surface_status(surf) ==
                                 CAIRO_STATUS_SUCCESS) {
                                 globfree(&g);
@@ -238,12 +533,7 @@ cairo_surface_t* get_icon(const char *name, int size) {
                  name, formats[f]);
         if (glob(pattern, GLOB_NOSORT, NULL, &g) == 0) {
             for (size_t j = 0; j < g.gl_pathc; j++) {
-                cairo_surface_t *surf = NULL;
-                if (strcmp(formats[f], "svg") == 0) {
-                    surf = load_svg_as_cairo_surface(g.gl_pathv[j], size);
-                } else {
-                    surf = cairo_image_surface_create_from_png(g.gl_pathv[j]);
-                }
+                cairo_surface_t *surf = load_icon_file(g.gl_pathv[j], size);
                 if (surf && cairo_surface_status(surf) == CAIRO_STATUS_SUCCESS) {
                     globfree(&g);
                     return surf;
