@@ -1,6 +1,11 @@
+# No package manifest: the checks workflow's actions are the only pinned
+# versions in the repository.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
