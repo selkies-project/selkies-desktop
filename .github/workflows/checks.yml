@@ -1,0 +1,38 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the build dependencies
+        # The same packages README.md names, on the distribution the desktop
+        # images are built from
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config \
+            libcairo2-dev libwayland-dev libx11-dev libxext-dev wayland-protocols
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: The binary starts and reports the display it lacks
+        # A runner has neither a layer-shell compositor nor an X server, so the
+        # one thing a headless check can hold the binary to is that it links,
+        # runs and says so rather than crashing
+        run: |
+          out="$(./selkies-desktop 2>&1 || true)"
+          echo "${out}"
+          echo "${out}" | grep -q "no Wayland layer shell compositor or X11 display available"
