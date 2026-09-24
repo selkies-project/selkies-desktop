@@ -314,7 +314,7 @@ static void sync_active() {
 
 /**
  * @brief Decides whether a managed window belongs on the taskbar. Docks,
- * desktops and windows that opt out through their EWMH state are left off.
+ * desktops, and windows that opt out through their EWMH state are left off.
  */
 static bool wants_taskbar_button(Window w) {
     if (property_has_atom(
@@ -331,7 +331,7 @@ static bool wants_taskbar_button(Window w) {
  * @brief Reconciles the taskbar with the window manager's client list. Drops
  * toplevels whose window is gone or no longer eligible, adds newly eligible
  * windows, and subscribes to property changes on every client so later title,
- * class and state updates are seen.
+ * class, and state updates are seen.
  */
 static void sync_clients() {
     unsigned long count;

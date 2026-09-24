@@ -123,7 +123,7 @@ typedef struct {
  *
  * @param a First entry.
  * @param b Second entry.
- * @return int Negative, zero or positive as qsort and bsearch expect.
+ * @return int Negative, zero, or positive as qsort and bsearch expect.
  */
 static int xpm_color_cmp(const void *a, const void *b) {
     uint32_t ka = ((const XpmColor *)a)->key;
@@ -199,7 +199,7 @@ static int xpm_key_rank(const char *token) {
 
 /**
  * @brief Resolves an XPM colour value to a premultiplied ARGB pixel. Handles
- * None, hex values of one to four digits per channel, a few common names and
+ * None, hex values of one to four digits per channel, a few common names, and
  * then the X11 rgb.txt database when it is installed. Unknown names fall back
  * to opaque black.
  *
@@ -870,7 +870,7 @@ void load_apps() {
 
 /**
  * @brief Releases every loaded application icon and clears the application,
- * desktop, category and claimed desktop file ID lists so they can be loaded
+ * desktop, category, and claimed desktop file ID lists so they can be loaded
  * again.
  */
 void unload_apps() {

@@ -31,7 +31,7 @@ jobs:
       - name: The binary starts and reports the display it lacks
         # A runner has neither a layer-shell compositor nor an X server, so the
         # one thing a headless check can hold the binary to is that it links,
-        # runs and says so rather than crashing
+        # runs, and says so rather than crashing
         run: |
           out="$(./selkies-desktop 2>&1 || true)"
           echo "${out}"

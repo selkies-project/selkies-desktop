@@ -664,7 +664,7 @@ static void launch_desktop_file(const char *d_path) {
 }
 
 /**
- * @brief Closes the start menu, resets its hover state and redraws the panel.
+ * @brief Closes the start menu, resets its hover state, and redraws the panel.
  */
 static void close_menu() {
     menu_open = false;
@@ -679,7 +679,7 @@ static void close_menu() {
 
 /**
  * @brief Handles pointer button press events to manage desktop icon
- * selection and launching, menu interactions and window state toggling.
+ * selection and launching, menu interactions, and window state toggling.
  *
  * @param id The surface the pointer is over.
  * @param x Pointer X position in logical surface coordinates.
