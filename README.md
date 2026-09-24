@@ -1,5 +1,7 @@
 # Selkies Desktop
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/selkies-project/selkies-desktop)
+
 > **Notice:** Selkies Desktop is **not** intended for general consumption. It is
 > not aiming to be a general-purpose Desktop Environment (DE) for people to use
 > outside of its specific ecosystem.
