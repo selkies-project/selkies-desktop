@@ -301,7 +301,7 @@ void draw_bg() {
         double max_w = DESKTOP_CELL_WIDTH - 4.0;
 
         if (extents.width <= max_w) {
-            strcpy(line1, name);
+            snprintf(line1, sizeof(line1), "%s", name);
         } else {
             int len = strlen(name);
             int split_idx = -1;
@@ -326,13 +326,13 @@ void draw_bg() {
                 cairo_text_extents(cr, rem, &extents);
 
                 if (extents.width <= max_w) {
-                    strcpy(line2, rem);
+                    snprintf(line2, sizeof(line2), "%s", rem);
                 } else {
                     for (int j = strlen(rem); j >= 0; j--) {
                         snprintf(temp, sizeof(temp), "%.*s...", j, rem);
                         cairo_text_extents(cr, temp, &extents);
                         if (extents.width <= max_w || j == 0) {
-                            strcpy(line2, temp);
+                            snprintf(line2, sizeof(line2), "%s", temp);
                             break;
                         }
                     }
@@ -342,7 +342,7 @@ void draw_bg() {
                     snprintf(temp, sizeof(temp), "%.*s...", j, name);
                     cairo_text_extents(cr, temp, &extents);
                     if (extents.width <= max_w || j == 0) {
-                        strcpy(line1, temp);
+                        snprintf(line1, sizeof(line1), "%s", temp);
                         break;
                     }
                 }
