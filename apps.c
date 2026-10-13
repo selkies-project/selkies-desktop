@@ -807,8 +807,14 @@ void load_desktop_apps() {
             } else if (strncmp(line, "Exec=", 5) == 0 && exec[0] == '\0') {
                 snprintf(exec, sizeof(exec), "%.255s", line + 5);
                 exec[strcspn(exec, "\n")] = 0;
+                /* Cut the field codes (%U, %f) and the spaces before them; an Exec that
+                 * starts with one leaves nothing to run. */
                 char *pct = strchr(exec, '%');
-                if (pct) *(pct - 1) = 0;
+                if (pct) {
+                    *pct = 0;
+                    for (size_t n = strlen(exec); n > 0 && exec[n - 1] == ' '; n--)
+                        exec[n - 1] = 0;
+                }
             } else if (strncmp(line, "Icon=", 5) == 0 && icon_name[0] == '\0') {
                 snprintf(icon_name, sizeof(icon_name), "%.127s", line + 5);
                 icon_name[strcspn(icon_name, "\n")] = 0;
