@@ -13,7 +13,6 @@
 #include <cairo/cairo-xlib.h>
 #include "desktop.h"
 
-#define MAX_SCALE 4
 #define MAX_SHAPE_RECTS (1 + 2 * (2 * MENU_RADIUS * MAX_SCALE + 1))
 #define MAX_ICON_PROPERTY_LENGTH (1L << 20)
 

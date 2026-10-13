@@ -6,6 +6,8 @@
 #include <cairo/cairo.h>
 
 #define PANEL_HEIGHT 30
+/* The largest output scale either backend draws at. */
+#define MAX_SCALE 4
 #define START_BTN_WIDTH 80
 #define ICON_SIZE 16
 #define MAX_MENU_HEIGHT 600

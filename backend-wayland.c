@@ -19,7 +19,7 @@ typedef struct {
     int fd;
     uint32_t *data;
     struct wl_buffer *buffer;
-    int size;
+    size_t size;
     int width;
     int height;
     int scale;
@@ -54,45 +54,69 @@ static PersistentBuffer bg_buffer = {0};
  */
 static int create_shm_file(off_t size) {
     int fd = memfd_create("panel-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    ftruncate(fd, size);
+    if (fd >= 0 && ftruncate(fd, size) != 0) {
+        close(fd);
+        fd = -1;
+    }
     return fd;
 }
 
+/* The largest surface side taken from the compositor, far past any output. */
+#define MAX_SURFACE_SIDE 16384
+
 /**
  * @brief Ensures a persistent shared memory buffer is correctly sized and mapped.
+ *
+ * The geometry is the compositor's word: a side past MAX_SURFACE_SIDE, a scale
+ * past MAX_SCALE, or a failed allocation leaves no buffer, never one smaller
+ * than what Cairo then draws into.
  *
  * @param b Pointer to the PersistentBuffer structure.
  * @param w Target width in logical pixels.
  * @param h Target height in logical pixels.
  * @param scale Output scaling factor.
+ * @return true when the buffer holds w x h at scale.
  */
-static void ensure_buffer(PersistentBuffer *b, int w, int h, int scale) {
-    int buffer_w = w * scale;
-    int buffer_h = h * scale;
-    int stride = buffer_w * 4;
-    int size = stride * buffer_h;
-
-    if (b->buffer && b->size == size) {
-        return;
+static bool ensure_buffer(PersistentBuffer *b, int w, int h, int scale) {
+    if (b->buffer && b->width == w && b->height == h && b->scale == scale) {
+        return true;
     }
 
     if (b->buffer) {
         wl_buffer_destroy(b->buffer);
         munmap(b->data, b->size);
         close(b->fd);
+        b->buffer = NULL;
     }
 
+    if (w < 1 || h < 1 || scale < 1 || scale > MAX_SCALE ||
+        (size_t)w * scale > MAX_SURFACE_SIDE || (size_t)h * scale > MAX_SURFACE_SIDE) {
+        return false;
+    }
+    int buffer_w = w * scale;
+    int buffer_h = h * scale;
+    int stride = buffer_w * 4;
+    size_t size = (size_t)stride * buffer_h;
+
+    b->fd = create_shm_file(size);
+    if (b->fd < 0) {
+        return false;
+    }
+    b->data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
+    if (b->data == MAP_FAILED) {
+        close(b->fd);
+        return false;
+    }
     b->size = size;
     b->width = w;
     b->height = h;
     b->scale = scale;
-    b->fd = create_shm_file(size);
-    b->data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, b->fd, size);
     b->buffer = wl_shm_pool_create_buffer(
         pool, 0, buffer_w, buffer_h, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
+    return true;
 }
 
 /**
@@ -134,7 +158,7 @@ static void output_done(void *data, struct wl_output *wl_output) {}
 static void output_scale_handler(
     void *data, struct wl_output *wl_output, int32_t factor) {
     if (factor > 0) {
-        output_scale = factor;
+        output_scale = factor > MAX_SCALE ? MAX_SCALE : factor;
     }
 }
 
@@ -274,7 +298,10 @@ toplevel_manager_listener = {
 static cairo_surface_t* wayland_begin_draw(
     SurfaceId id, int w, int h, int scale) {
     PersistentBuffer *b = (id == SURFACE_BG) ? &bg_buffer : &ui_buffer;
-    ensure_buffer(b, w, h, scale);
+    if (!ensure_buffer(b, w, h, scale)) {
+        /* Drawing into an empty surface is a no-op; the surface keeps no buffer. */
+        return cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 0, 0);
+    }
 
     int buffer_w = w * scale;
     int buffer_h = h * scale;
