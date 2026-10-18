@@ -40,5 +40,7 @@ fetch-deps:
 	curl -fsS -o protocols/wlr-foreign-toplevel-management-unstable-v1.xml https://gitlab.freedesktop.org/wlroots/wlr-protocols/-/raw/$(FOREIGN_TOPLEVEL_REV)/unstable/wlr-foreign-toplevel-management-unstable-v1.xml
 	curl -fsS -o vendor/nanosvg.h https://raw.githubusercontent.com/memononen/nanosvg/$(NANOSVG_REV)/src/nanosvg.h
 	curl -fsS -o vendor/nanosvgrast.h https://raw.githubusercontent.com/memononen/nanosvg/$(NANOSVGRAST_REV)/src/nanosvgrast.h
+	# Drops a null check of two pointers set just before it (CodeQL cpp/redundant-null-check-simple).
+	git apply vendor/nanosvg.patch
 
 .PHONY: all clean fetch-deps

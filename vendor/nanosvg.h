@@ -315,11 +315,9 @@ static void nsvg__parseElement(char* s,
 		while (*s && *s != quote) s++;
 		if (*s) { *s++ = '\0'; }
 
-		// Store only well formed attributes
-		if (name && value) {
-			attr[nattr++] = name;
-			attr[nattr++] = value;
-		}
+		// Both are set by now: a malformed attribute left the loop above.
+		attr[nattr++] = name;
+		attr[nattr++] = value;
 	}
 
 	// List terminator
