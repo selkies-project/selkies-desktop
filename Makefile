@@ -33,6 +33,12 @@ LAYER_SHELL_REV = d1598e82240d6e8ca57729495a94d4e11d222033
 FOREIGN_TOPLEVEL_REV = 005d69d048ccceb2af3f5b86665821e8fa9a87b8
 NANOSVG_REV = e6d3dd25415539b24e08bf54ef7f3cd37e60152e
 NANOSVGRAST_REV = 2dba6182462275e67a59df251fff17ecdfb93770
+# What each file at its revision hashes to, checked before the patch applies;
+# a revision bump takes its hash with it
+LAYER_SHELL_SHA256 = 996b8c66e1c2276c443336d4cb174634e8e5948823779042f244930525b79cc2
+FOREIGN_TOPLEVEL_SHA256 = 4ecc4588858e29fe680a33521e1f22bcf22071d66d1553fe96b4ddec03d591d2
+NANOSVG_SHA256 = 91b49a9c440e67ae9ef1292f1d360e34ddefa4293b4898e227c755c76d3bd9a4
+NANOSVGRAST_SHA256 = 79a9c5f4db19debf9f3a648a1589e96d92854f245a5cb4f3d823f263785234d8
 
 fetch-deps:
 	mkdir -p protocols vendor
@@ -40,6 +46,11 @@ fetch-deps:
 	curl -fsS -o protocols/wlr-foreign-toplevel-management-unstable-v1.xml https://gitlab.freedesktop.org/wlroots/wlr-protocols/-/raw/$(FOREIGN_TOPLEVEL_REV)/unstable/wlr-foreign-toplevel-management-unstable-v1.xml
 	curl -fsS -o vendor/nanosvg.h https://raw.githubusercontent.com/memononen/nanosvg/$(NANOSVG_REV)/src/nanosvg.h
 	curl -fsS -o vendor/nanosvgrast.h https://raw.githubusercontent.com/memononen/nanosvg/$(NANOSVGRAST_REV)/src/nanosvgrast.h
+	printf '%s  %s\n' \
+		$(LAYER_SHELL_SHA256) protocols/wlr-layer-shell-unstable-v1.xml \
+		$(FOREIGN_TOPLEVEL_SHA256) protocols/wlr-foreign-toplevel-management-unstable-v1.xml \
+		$(NANOSVG_SHA256) vendor/nanosvg.h \
+		$(NANOSVGRAST_SHA256) vendor/nanosvgrast.h | sha256sum -c -
 	# Drops a null check of two pointers set just before it (CodeQL cpp/redundant-null-check-simple).
 	git apply vendor/nanosvg.patch
 
