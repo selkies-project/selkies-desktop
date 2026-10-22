@@ -1765,8 +1765,8 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: flags } => {
                 let mut toplevel_state = ToplevelState::default();
-                for chunk in flags.chunks_exact(4) {
-                    let value = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                for chunk in flags.as_chunks::<4>().0 {
+                    let value = u32::from_ne_bytes(*chunk);
                     match value {
                         0 => toplevel_state.maximized = true,
                         1 => toplevel_state.minimized = true,

@@ -1408,7 +1408,7 @@ pub fn key(d: &mut Desktop, id: u32, key: Key, modifiers: Modifiers) {
                 return;
             }
             let cols = if w.view == View::Icons {
-                grid_columns(layout.content) as i32
+                grid_columns(layout.content)
             } else {
                 1
             };

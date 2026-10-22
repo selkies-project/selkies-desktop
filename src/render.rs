@@ -725,7 +725,12 @@ pub fn pixmap_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Pixmap> 
     }
     let mut pix = Pixmap::new(width, height)?;
     let data = pix.data_mut();
-    for (dst, src) in data.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+    for (dst, src) in data
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(rgba.as_chunks::<4>().0)
+    {
         let a = src[3] as u32;
         dst[0] = (src[0] as u32 * a / 255) as u8;
         dst[1] = (src[1] as u32 * a / 255) as u8;
@@ -792,16 +797,10 @@ pub fn resize_pixmap(image: &Pixmap, size: u32) -> Option<Pixmap> {
         ((w as u64 * size as u64 / h as u64).max(1) as u32, size)
     };
     let mut straight = Vec::with_capacity(image.data().len());
-    for px in image.data().chunks_exact(4) {
+    for px in image.data().as_chunks::<4>().0 {
         let a = px[3] as u32;
-        if a == 0 {
-            straight.extend_from_slice(&[0, 0, 0, 0]);
-        } else {
-            straight.push((px[0] as u32 * 255 / a).min(255) as u8);
-            straight.push((px[1] as u32 * 255 / a).min(255) as u8);
-            straight.push((px[2] as u32 * 255 / a).min(255) as u8);
-            straight.push(px[3]);
-        }
+        let unmul = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255) as u8;
+        straight.extend_from_slice(&[unmul(px[0]), unmul(px[1]), unmul(px[2]), px[3]]);
     }
     let buffer = image::RgbaImage::from_raw(w, h, straight)?;
     let scaled = image::imageops::resize(&buffer, nw, nh, image::imageops::FilterType::Triangle);

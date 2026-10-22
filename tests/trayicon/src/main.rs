@@ -56,7 +56,9 @@ fn main() {
             xproto::WindowClass::INPUT_OUTPUT,
             screen.root_visual,
             &xproto::CreateWindowAux::new().background_pixel(color).event_mask(
-                xproto::EventMask::BUTTON_PRESS | xproto::EventMask::STRUCTURE_NOTIFY | xproto::EventMask::EXPOSURE,
+                xproto::EventMask::BUTTON_PRESS
+                    | xproto::EventMask::STRUCTURE_NOTIFY
+                    | xproto::EventMask::EXPOSURE,
             ),
         )
         .unwrap();

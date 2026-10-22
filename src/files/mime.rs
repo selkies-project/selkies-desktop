@@ -69,9 +69,10 @@ impl MimeDb {
             }
         }
         for list in db.extensions.values_mut() {
-            list.sort_by(|a, b| b.0.cmp(&a.0));
+            list.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
         }
-        db.patterns.sort_by(|a, b| b.weight.cmp(&a.weight));
+        db.patterns
+            .sort_by_key(|pattern| std::cmp::Reverse(pattern.weight));
         db
     }
 

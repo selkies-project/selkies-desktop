@@ -106,8 +106,10 @@ pub fn copy_bgra(src: &[u8], dst: &mut [u8], stride: usize, x: usize, y: usize, 
             break;
         }
         for (d, s) in dst[start..end]
-            .chunks_exact_mut(4)
-            .zip(src[start..end].chunks_exact(4))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src[start..end].as_chunks::<4>().0)
         {
             d[0] = s[2];
             d[1] = s[1];

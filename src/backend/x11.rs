@@ -910,9 +910,9 @@ impl X11Backend {
         );
         if let Some(icon) = icon {
             let mut data: Vec<u32> = vec![icon.width(), icon.height()];
-            for px in icon.data().chunks_exact(4) {
+            for px in icon.data().as_chunks::<4>().0 {
                 let a = px[3] as u32;
-                let unmul = |c: u8| if a == 0 { 0 } else { (c as u32 * 255 / a).min(255) };
+                let unmul = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255);
                 data.push((a << 24) | (unmul(px[0]) << 16) | (unmul(px[1]) << 8) | unmul(px[2]));
             }
             let _ = self.conn.change_property32(

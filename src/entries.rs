@@ -554,7 +554,7 @@ fn load_desktop_dir(locales: &[String]) -> Vec<Entry> {
             entries.push(entry);
         }
     }
-    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
 }
 
