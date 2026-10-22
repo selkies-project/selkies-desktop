@@ -1,0 +1,9 @@
+# Static, self-contained builds for distribution.  Neither needs a system
+# cross toolchain: rustup ships the musl CRT objects and rust-lld links them.
+#   cargo build --release --target x86_64-unknown-linux-musl
+#   cargo build --release --target aarch64-unknown-linux-musl
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=yes", "-C", "linker=rust-lld"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-self-contained=yes", "-C", "linker=rust-lld"]
