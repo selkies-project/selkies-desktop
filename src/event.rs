@@ -159,10 +159,15 @@ pub enum Request {
     MenuOpen(bool),
     /// Use the pointer shape for a clickable or a plain area.
     Cursor { pointer: bool },
-    /// Place the bar: along the top edge or the bottom, at a height, and
-    /// whether it hides, in which case it reserves no space and stays above
-    /// windows.
-    Panel { top: bool, height: i32, autohide: bool },
+    /// Place the bar: along the top edge or the bottom, reserving a height
+    /// that includes the margin that floats it off the edge, and whether it
+    /// hides, in which case it reserves no space and stays above windows.
+    Panel {
+        top: bool,
+        height: i32,
+        autohide: bool,
+        margin: i32,
+    },
     /// Set the default sink's volume, in percent.
     SetVolume(u8),
     /// Toggle the default sink's mute.

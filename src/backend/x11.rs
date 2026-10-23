@@ -121,6 +121,9 @@ pub struct X11Backend {
     pointer_shape: bool,
     panel_top: bool,
     panel_height: i32,
+    /// Space between the bar and the screen edges, which floats it and
+    /// rounds every corner of it.
+    panel_margin: i32,
     panel_autohide: bool,
     events: Vec<Event>,
     windows: Vec<X11Window>,
@@ -226,6 +229,7 @@ impl X11Backend {
             pointer_shape: false,
             panel_top: false,
             panel_height: ui::PANEL_HEIGHT,
+            panel_margin: 0,
             panel_autohide: false,
             events: Vec::new(),
             windows: Vec::new(),
@@ -711,8 +715,10 @@ impl X11Backend {
     fn apply_shape(&self, surface: &X11Surface, input: &[Rect], scale: i32, round_popups: bool) {
         let mut bounding: Vec<xproto::Rectangle> = Vec::new();
         for (i, rect) in surface.visible.iter().enumerate() {
-            if i == 0 && round_popups && rect.w < surface.width {
-                let overflow = (ui::PANEL_RADIUS as i32) * scale;
+            if i == 0 && round_popups && self.panel_margin > 0 {
+                add_rounded_shape(&mut bounding, *rect, (ui::panel_radius() as i32) * scale);
+            } else if i == 0 && round_popups && rect.w < surface.width {
+                let overflow = (ui::panel_radius() as i32) * scale;
                 let extended = if self.panel_top {
                     Rect::new(rect.x, rect.y - overflow, rect.w, rect.h + overflow)
                 } else {
@@ -722,7 +728,7 @@ impl X11Backend {
             } else if i == 0 || !round_popups {
                 push_rect(&mut bounding, *rect);
             } else {
-                add_rounded_shape(&mut bounding, *rect, (ui::POPUP_RADIUS as i32) * scale);
+                add_rounded_shape(&mut bounding, *rect, (ui::popup_radius() as i32) * scale);
             }
         }
         let _ = self.conn.shape_rectangles(
@@ -1762,7 +1768,9 @@ impl Backend for X11Backend {
                 top,
                 height,
                 autohide,
+                margin,
             } => {
+                self.panel_margin = *margin;
                 if self.panel_top != *top || self.panel_height != *height || self.panel_autohide != *autohide
                 {
                     self.panel_top = *top;

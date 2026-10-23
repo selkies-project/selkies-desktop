@@ -14,7 +14,7 @@ use crate::entries;
 use crate::event::{Button, Modifiers, Request};
 use crate::files::{
     self, Clipboard, Confirm, ContextMenu, DropTarget, FilesWindow, Item, MenuAction, MenuRow, PickTarget,
-    Press, Rename, SortKey, View,
+    Press, Rename, ScrollArea, SortKey, View,
 };
 use crate::geom::Rect;
 use crate::i18n::{tr, trf};
@@ -100,12 +100,17 @@ pub enum Hit {
     Confirm(usize),
     /// A picker footer button: cancel, then open.
     PickerButton(usize),
+    /// The scrollbar of an area.
+    Scrollbar(ScrollArea),
 }
 
 impl Hit {
     /// Whether the hand cursor suits the target.
     pub fn clickable(self) -> bool {
-        !matches!(self, Hit::None | Hit::Item(_) | Hit::Content | Hit::PathField)
+        !matches!(
+            self,
+            Hit::None | Hit::Item(_) | Hit::Content | Hit::PathField | Hit::Scrollbar(_)
+        )
     }
 }
 
@@ -281,6 +286,26 @@ fn content_height(w: &FilesWindow, content: Rect) -> i32 {
     }
 }
 
+/// The scrollbar of an area of a window, when its content scrolls.
+///
+/// # Arguments
+/// * `w` - The window.
+/// * `layout` - The window's layout.
+/// * `area` - The area.
+/// * `places` - How many places the sidebar lists.
+fn scrollbar(w: &FilesWindow, layout: &Layout, area: ScrollArea, places: usize) -> Option<ui::Scrollbar> {
+    match area {
+        ScrollArea::Sidebar if layout.sidebar.w > 0 => {
+            let content = places as i32 * PLACE_ROW + 2 * PAD;
+            ui::Scrollbar::new(layout.sidebar, content, w.sidebar_scroll)
+        }
+        ScrollArea::Sidebar => None,
+        ScrollArea::Content => {
+            ui::Scrollbar::new(layout.content, content_height(w, layout.content), w.scroll)
+        }
+    }
+}
+
 /// Clamps a window's scroll to its content.
 fn clamp_scroll(w: &mut FilesWindow, content: Rect) {
     let max = (content_height(w, content) - content.h).max(0) as f64;
@@ -414,6 +439,11 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
     if layout.path.contains(x, y) {
         return Hit::PathField;
     }
+    for area in [ScrollArea::Sidebar, ScrollArea::Content] {
+        if scrollbar(w, &layout, area, d.files.places.len()).is_some_and(|bar| bar.track.contains(x, y)) {
+            return Hit::Scrollbar(area);
+        }
+    }
     if layout.sidebar.w > 0 && layout.sidebar.contains(x, y) {
         let row = ((y - layout.sidebar.y as f64 - PAD as f64 + w.sidebar_scroll) / PLACE_ROW as f64).floor();
         if row >= 0.0 && (row as usize) < d.files.places.len() {
@@ -463,6 +493,21 @@ pub fn hit(d: &mut Desktop, id: u32, x: f64, y: f64) -> Hit {
 /// * `x` - Pointer X.
 /// * `y` - Pointer Y.
 pub fn pointer_motion(d: &mut Desktop, id: u32, x: f64, y: f64) {
+    let places = d.files.places.len();
+    if let Some(w) = d.files.window_mut(id)
+        && let Some((area, grab)) = w.bar_drag
+    {
+        let layout = layout(w);
+        if let Some(bar) = scrollbar(w, &layout, area, places) {
+            let scroll = bar.scroll_at(y, grab);
+            match area {
+                ScrollArea::Sidebar => w.sidebar_scroll = scroll,
+                ScrollArea::Content => w.scroll = scroll,
+            }
+            w.dirty = true;
+        }
+        return;
+    }
     if let Some(press) = d.files.window(id).and_then(|w| w.press) {
         let moved = (x - press.x).abs() > DRAG_THRESHOLD || (y - press.y).abs() > DRAG_THRESHOLD;
         if moved {
@@ -571,6 +616,13 @@ pub fn pointer_button(
     if !pressed {
         if button == Button::Left
             && let Some(w) = d.files.window_mut(id)
+            && w.bar_drag.take().is_some()
+        {
+            update_hover(d, id, x, y);
+            return;
+        }
+        if button == Button::Left
+            && let Some(w) = d.files.window_mut(id)
             && let Some(press) = w.press.take()
             && press.was_selected
             && !modifiers.ctrl
@@ -586,6 +638,7 @@ pub fn pointer_button(
         return;
     }
     let hit = hit(d, id, x, y);
+    let places = d.files.places.len();
     let Some(w) = d.files.window_mut(id) else {
         return;
     };
@@ -719,6 +772,18 @@ pub fn pointer_button(
                     item: None,
                     was_selected: false,
                 });
+            }
+            Hit::Scrollbar(area) => {
+                let layout = layout(w);
+                if let Some(bar) = scrollbar(w, &layout, area, places) {
+                    let grab = bar.grab(y);
+                    let scroll = bar.scroll_at(y, grab);
+                    match area {
+                        ScrollArea::Sidebar => w.sidebar_scroll = scroll,
+                        ScrollArea::Content => w.scroll = scroll,
+                    }
+                    w.bar_drag = Some((area, grab));
+                }
             }
             Hit::PickerButton(0) => close(d, id),
             Hit::PickerButton(_) => {
@@ -1736,6 +1801,15 @@ pub fn draw(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         View::Icons => draw_grid(d, index, canvas, &layout, hover, scale),
         View::List => draw_list(d, index, canvas, &layout, hover, scale),
     }
+    let places = d.files.places.len();
+    let w = &d.files.windows[index];
+    for area in [ScrollArea::Sidebar, ScrollArea::Content] {
+        if let Some(bar) = scrollbar(w, &layout, area, places) {
+            let active =
+                hover == Hit::Scrollbar(area) || w.bar_drag.is_some_and(|(dragged, _)| dragged == area);
+            bar.draw(canvas, active);
+        }
+    }
     draw_status(d, index, canvas, &layout, scale);
     if let Some(footer) = layout.footer {
         draw_footer(d, index, canvas, footer, hover);
@@ -2439,7 +2513,7 @@ fn draw_menu(d: &mut Desktop, index: usize, canvas: &mut Canvas<'_>, hover: Hit)
         return;
     };
     let frame = menu_rect(&d.files.windows[index], &menu);
-    canvas.fill_rounded(frame.inflate(1), ui::POPUP_RADIUS, rgba(0, 0, 0, 0x50));
+    canvas.fill_rounded(frame.inflate(1), ui::popup_radius(), rgba(0, 0, 0, 0x50));
     ui::draw_popup_frame(canvas, frame);
     let mut y = frame.y + 6;
     for (i, row) in menu.rows.iter().enumerate() {

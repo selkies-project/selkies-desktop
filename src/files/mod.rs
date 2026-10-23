@@ -163,6 +163,15 @@ pub struct Press {
     pub was_selected: bool,
 }
 
+/// An area of a window that scrolls on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollArea {
+    /// The places in the sidebar.
+    Sidebar,
+    /// The folder's items.
+    Content,
+}
+
 /// An item being renamed.
 #[derive(Clone, Debug)]
 pub struct Rename {
@@ -308,6 +317,8 @@ pub struct FilesWindow {
     pub drop_target: Option<DropTarget>,
     /// The last click, for double clicks.
     pub last_click: Option<(u32, usize)>,
+    /// The scrollbar thumb being dragged, with the offset into it grabbed.
+    pub bar_drag: Option<(ScrollArea, f64)>,
     /// The inotify watch on the folder.
     watch: i32,
     /// When the folder is read again after a change.
@@ -503,6 +514,7 @@ impl Manager {
             status: None,
             drop_target: None,
             last_click: None,
+            bar_drag: None,
             watch: -1,
             rescan_at: None,
             progress: None,

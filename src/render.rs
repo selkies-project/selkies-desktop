@@ -80,6 +80,53 @@ pub fn parse_color(text: &str) -> Option<Color> {
     Some(Color::from_rgba8(channel(0)?, channel(2)?, channel(4)?, a))
 }
 
+/// An opaque color from a hue in degrees and a saturation and value from 0 to 1.
+///
+/// # Arguments
+/// * `h` - Hue in degrees; any value, taken modulo 360.
+/// * `s` - Saturation, 0 for gray to 1 for the pure hue.
+/// * `v` - Value, 0 for black to 1 for the brightest.
+pub fn hsv_to_color(h: f32, s: f32, v: f32) -> Color {
+    let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+    let h = h.rem_euclid(360.0) / 60.0;
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i as i32 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    Color::from_rgba(r, g, b, 1.0).unwrap_or(Color::BLACK)
+}
+
+/// The hue in degrees, saturation and value of a color; gray has hue 0.
+///
+/// # Arguments
+/// * `color` - The color; its alpha is ignored.
+pub fn color_to_hsv(color: Color) -> (f32, f32, f32) {
+    let (r, g, b) = (color.red(), color.green(), color.blue());
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let h = if delta <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    let s = if max <= 0.0 { 0.0 } else { delta / max };
+    (h, s, max)
+}
+
 /// A line of shaped text ready to be drawn any number of times.
 pub struct Text {
     buffer: Buffer,
@@ -398,6 +445,63 @@ impl<'a> Canvas<'a> {
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
+        let mask = self.clip_mask();
+        self.pix.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            mask.as_ref(),
+        );
+    }
+
+    /// Fills a rounded rectangle with a color computed for every pixel from
+    /// its place in the rectangle, for gradients and color spectra; the
+    /// colors' alpha is kept.
+    ///
+    /// # Arguments
+    /// * `rect` - The logical rectangle.
+    /// * `radius` - Corner radius in logical pixels.
+    /// * `shade` - The color at a point, given its horizontal and vertical
+    ///   position from 0 at the left or top edge to 1 at the right or bottom.
+    pub fn fill_rounded_shaded(&mut self, rect: Rect, radius: f32, shade: impl Fn(f32, f32) -> Color) {
+        if self.clip_empty() {
+            return;
+        }
+        let r = rect.scaled(self.scale);
+        let (Ok(w), Ok(h)) = (u32::try_from(r.w), u32::try_from(r.h)) else {
+            return;
+        };
+        let Some(mut tile) = Pixmap::new(w, h) else {
+            return;
+        };
+        {
+            let data = tile.data_mut();
+            let span_x = (w - 1).max(1) as f32;
+            let span_y = (h - 1).max(1) as f32;
+            for y in 0..h {
+                let v = y as f32 / span_y;
+                for x in 0..w {
+                    let c = shade(x as f32 / span_x, v).premultiply().to_color_u8();
+                    let i = ((y * w + x) * 4) as usize;
+                    data[i..i + 4].copy_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+                }
+            }
+        }
+        let Some(path) = self.rounded_path(rect, radius) else {
+            return;
+        };
+        let paint = Paint {
+            anti_alias: true,
+            shader: tiny_skia::Pattern::new(
+                tile.as_ref(),
+                tiny_skia::SpreadMode::Pad,
+                FilterQuality::Nearest,
+                1.0,
+                Transform::from_translate(r.x as f32, r.y as f32),
+            ),
+            ..Paint::default()
+        };
         let mask = self.clip_mask();
         self.pix.fill_path(
             &path,
@@ -856,6 +960,44 @@ mod tests {
         assert_eq!((c.red(), c.alpha()), (255, 0x80));
         assert!(parse_color("#12345").is_none());
         assert!(parse_color("blue").is_none());
+    }
+
+    #[test]
+    fn hsv_round_trips_through_rgb() {
+        for hex in [
+            "#7967c5", "#0a0e17", "#eef2f8", "#ff0000", "#00ff00", "#0000ff", "#000000", "#ffffff", "#808080",
+        ] {
+            let color = parse_color(hex).unwrap();
+            let (h, s, v) = color_to_hsv(color);
+            let back = hsv_to_color(h, s, v).to_color_u8();
+            let c = color.to_color_u8();
+            assert_eq!(
+                (back.red(), back.green(), back.blue()),
+                (c.red(), c.green(), c.blue()),
+                "{hex}"
+            );
+        }
+        let (h, s, v) = color_to_hsv(rgb(0, 255, 0));
+        assert!((h - 120.0).abs() < 0.01 && (s - 1.0).abs() < 0.01 && (v - 1.0).abs() < 0.01);
+        let (h, s, _) = color_to_hsv(rgb(128, 128, 128));
+        assert_eq!((h, s), (0.0, 0.0));
+        let red = hsv_to_color(360.0, 1.0, 1.0).to_color_u8();
+        assert_eq!((red.red(), red.green(), red.blue()), (255, 0, 0));
+    }
+
+    #[test]
+    fn shaded_fill_follows_position() {
+        let mut pix = Pixmap::new(10, 4).unwrap();
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), 1);
+            canvas.fill_rounded_shaded(Rect::new(0, 0, 10, 4), 0.0, |u, _| {
+                Color::from_rgba(u, 0.0, 0.0, 1.0).unwrap()
+            });
+        }
+        let px = |x: usize| pix.data()[(10 + x) * 4];
+        assert_eq!(px(0), 0);
+        assert_eq!(px(9), 255);
+        assert!(px(4) > px(1) && px(4) < px(8));
     }
 
     #[test]

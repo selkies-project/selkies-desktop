@@ -36,6 +36,13 @@ pub fn now() -> LocalTime {
     local(secs)
 }
 
+/// A Unix time as the C library's `time_t`, which libc deprecates naming on
+/// musl while the alias moves to 64 bits; the cast is what either width needs.
+#[allow(deprecated)]
+fn time_t(secs: i64) -> libc::time_t {
+    secs as libc::time_t
+}
+
 /// Breaks a Unix time down in the local time zone.
 ///
 /// # Arguments
@@ -44,7 +51,7 @@ pub fn local(secs: i64) -> LocalTime {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
         tzset();
-        let secs = secs as libc::time_t;
+        let secs = time_t(secs);
         libc::localtime_r(&secs, &mut tm);
     }
     LocalTime {
@@ -83,7 +90,7 @@ pub fn format_time(secs: i64, format: &str) -> String {
     let mut buf = [0u8; 256];
     let written = unsafe {
         tzset();
-        let secs = secs as libc::time_t;
+        let secs = time_t(secs);
         libc::localtime_r(&secs, &mut tm);
         libc::strftime(
             buf.as_mut_ptr() as *mut libc::c_char,

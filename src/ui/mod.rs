@@ -6,10 +6,12 @@ pub mod files;
 pub mod menu;
 pub mod panel;
 pub mod popups;
+pub mod preview;
 pub mod settings;
 
 use tiny_skia::{Color, Path, PathBuilder};
 
+use crate::config::{Surface, WindowStyle};
 use crate::geom::Rect;
 use crate::render::{Align, Canvas, Fonts, rgb, rgba};
 
@@ -25,8 +27,6 @@ pub const DESKTOP_ICON_SIZE: i32 = 48;
 pub const DESKTOP_CELL_WIDTH: i32 = 96;
 /// Height of a desktop launcher cell.
 pub const DESKTOP_CELL_HEIGHT: i32 = 104;
-/// Corner radius of popups.
-pub const POPUP_RADIUS: f32 = 8.0;
 /// Space between the bar and a popup, and between popups and the screen edge.
 pub const POPUP_MARGIN: i32 = 6;
 /// The tallest popup area the panel surface must leave room for.
@@ -72,6 +72,104 @@ impl Default for Theme {
 
 /// The theme in use.
 static THEME: std::sync::RwLock<Option<Theme>> = std::sync::RwLock::new(None);
+/// The window style in use, which the bar and the popups follow.
+static STYLE: std::sync::RwLock<Option<WindowStyle>> = std::sync::RwLock::new(None);
+
+/// Puts a window style in use for everything drawn from now on.
+///
+/// # Arguments
+/// * `style` - The style.
+pub fn set_style(style: WindowStyle) {
+    *STYLE.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(style);
+}
+
+/// The window style in use.
+pub fn style() -> WindowStyle {
+    STYLE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_default()
+}
+
+/// Corner radius of popups, the one windows have.
+pub fn popup_radius() -> f32 {
+    style().corners as f32
+}
+
+/// Corner radius of a bar narrower than the screen: a little more than the
+/// popups', none when they are square.
+pub fn panel_radius() -> f32 {
+    let corners = style().corners;
+    if corners == 0 { 0.0 } else { corners as f32 + 2.0 }
+}
+
+/// The color of a surface at a point, for the surface style in use: the
+/// base color flat, lightened towards the top for the gradient, and a
+/// lighter upper half over a darker lower half for the gloss.
+///
+/// # Arguments
+/// * `base` - The surface's color.
+/// * `v` - Vertical position from 0 at the top to 1 at the bottom.
+pub fn surface_shade(base: Color, v: f32) -> Color {
+    surface_shade_in(style().surface, base, v)
+}
+
+/// The color of a surface at a point for a given surface style; see
+/// `surface_shade`.
+///
+/// # Arguments
+/// * `surface` - The surface style.
+/// * `base` - The surface's color.
+/// * `v` - Vertical position from 0 at the top to 1 at the bottom.
+pub fn surface_shade_in(surface: Surface, base: Color, v: f32) -> Color {
+    match surface {
+        Surface::Flat => base,
+        Surface::Gradient => shifted(base, (14.0 * (1.0 - v)).round() as i32),
+        Surface::Glossy => gloss(base, v, 0.5),
+    }
+}
+
+/// The color of a glossy surface at a vertical position: a lighter band
+/// down to a split, fading a little, then the base darkening slightly to
+/// the bottom.
+///
+/// # Arguments
+/// * `base` - The surface's color.
+/// * `v` - Vertical position from 0 at the top to 1 at the bottom.
+/// * `split` - Where the band ends, from 0 to 1.
+fn gloss(base: Color, v: f32, split: f32) -> Color {
+    if v < split {
+        shifted(base, (22.0 - 10.0 * v / split).round() as i32)
+    } else {
+        shifted(
+            base,
+            (-6.0 * (v - split) / (1.0 - split).max(0.01)).round() as i32,
+        )
+    }
+}
+
+/// Tallest the gloss band of a glossy surface grows, so a tall popup gets
+/// a sheen along its top rather than a seam through its middle.
+const GLOSS_BAND: i32 = 28;
+
+/// Fills a rounded surface in its style: flat in one call, else shaded
+/// from top to bottom.
+///
+/// # Arguments
+/// * `canvas` - The target.
+/// * `rect` - The surface.
+/// * `radius` - Corner radius.
+/// * `base` - The surface's color, its alpha kept.
+pub fn fill_surface(canvas: &mut Canvas<'_>, rect: Rect, radius: f32, base: Color) {
+    match style().surface {
+        Surface::Flat => canvas.fill_rounded(rect, radius, base),
+        Surface::Gradient => canvas.fill_rounded_shaded(rect, radius, |_, v| surface_shade(base, v)),
+        Surface::Glossy => {
+            let split = (GLOSS_BAND as f32 / rect.h.max(1) as f32).min(0.5);
+            canvas.fill_rounded_shaded(rect, radius, |_, v| gloss(base, v, split));
+        }
+    }
+}
 
 /// Puts a theme in use for everything drawn from now on.
 ///
@@ -100,10 +198,28 @@ fn with_alpha(color: Color, alpha: u8) -> Color {
 /// # Arguments
 /// * `color` - The color.
 /// * `by` - Steps to add to each channel, negative to darken.
-fn shifted(color: Color, by: i32) -> Color {
+pub fn shifted(color: Color, by: i32) -> Color {
     let c = color.to_color_u8();
     let step = |v: u8| (v as i32 + by).clamp(0, 255) as u8;
     rgba(step(c.red()), step(c.green()), step(c.blue()), c.alpha())
+}
+
+/// A color mixed towards another, the alpha of the first kept.
+///
+/// # Arguments
+/// * `color` - The color.
+/// * `towards` - The color mixed in.
+/// * `amount` - The share of the second color, 0 for none to 1 for all.
+pub fn blend(color: Color, towards: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |a: f32, b: f32| a + (b - a) * amount;
+    Color::from_rgba(
+        mix(color.red(), towards.red()),
+        mix(color.green(), towards.green()),
+        mix(color.blue(), towards.blue()),
+        color.alpha(),
+    )
+    .unwrap_or(color)
 }
 
 /// Bar background at an opacity in percent.
@@ -113,8 +229,6 @@ fn shifted(color: Color, by: i32) -> Color {
 pub fn panel_bg(opacity: i32) -> Color {
     with_alpha(theme().panel, (opacity.clamp(0, 100) * 255 / 100) as u8)
 }
-/// Corner radius of a bar narrower than the screen.
-pub const PANEL_RADIUS: f32 = 10.0;
 /// Popup background.
 pub fn popup_bg() -> Color {
     theme().popup
@@ -169,6 +283,29 @@ pub fn separator() -> Color {
 pub fn text_alpha(alpha: u8) -> Color {
     with_alpha(theme().text, alpha)
 }
+/// The perceived lightness of a color, 0 for black to 1 for white.
+///
+/// # Arguments
+/// * `color` - The color.
+pub fn luminance(color: Color) -> f32 {
+    0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+}
+
+/// Whether the theme's text is light, so what contrasts with it is dark.
+pub fn light_text() -> bool {
+    luminance(theme().text) > 0.5
+}
+
+/// A shadow under text drawn over the wallpaper: dark under light text,
+/// light under dark text, so the text reads either way.
+pub fn text_shadow() -> Color {
+    if light_text() {
+        rgba(0, 0, 0, 0xa0)
+    } else {
+        rgba(0xff, 0xff, 0xff, 0xa0)
+    }
+}
+
 /// Text drawn over the accent: black on a light accent, white on a dark one.
 pub fn on_accent() -> Color {
     let c = theme().accent.to_color_u8();
@@ -180,14 +317,96 @@ pub fn on_accent() -> Color {
     }
 }
 
+/// Width of the band at the right edge of scrolled content where its
+/// scrollbar sits, wide enough for a finger.
+pub const SCROLLBAR: i32 = 14;
+/// Least height of a scrollbar's thumb.
+const THUMB_MIN: i32 = 28;
+/// Space between a scrollbar's thumb and the ends of its track.
+const THUMB_INSET: i32 = 2;
+
+/// A vertical scrollbar over the right edge of an area of scrolled content:
+/// a thumb the pointer drags, on a track that is not drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Scrollbar {
+    /// The band a press lands in, the whole height of the area.
+    pub track: Rect,
+    /// The thumb, placed for the current scroll.
+    pub thumb: Rect,
+    /// How far the content scrolls at most.
+    max: f64,
+}
+
+impl Scrollbar {
+    /// The scrollbar of an area, or `None` when its content fits.
+    ///
+    /// # Arguments
+    /// * `area` - The area the content scrolls in.
+    /// * `content` - Height of the content.
+    /// * `scroll` - The current scroll offset.
+    pub fn new(area: Rect, content: i32, scroll: f64) -> Option<Scrollbar> {
+        let max = (content - area.h) as f64;
+        let run = area.h - 2 * THUMB_INSET;
+        if max <= 0.0 || run <= 0 {
+            return None;
+        }
+        let track = Rect::new(area.right() - SCROLLBAR, area.y, SCROLLBAR, area.h);
+        let thumb_h = ((run as f64 * area.h as f64 / content as f64) as i32).clamp(THUMB_MIN.min(run), run);
+        let travel = (run - thumb_h) as f64;
+        let y = track.y + THUMB_INSET + (travel * (scroll / max).clamp(0.0, 1.0)).round() as i32;
+        let thumb = Rect::new(track.x + 3, y, SCROLLBAR - 6, thumb_h);
+        Some(Scrollbar { track, thumb, max })
+    }
+
+    /// Where in the thumb a press grabs it: the pointer's offset when the
+    /// press is on the thumb, its middle otherwise so the thumb jumps under
+    /// the pointer.
+    ///
+    /// # Arguments
+    /// * `y` - Pointer Y.
+    pub fn grab(&self, y: f64) -> f64 {
+        if y >= self.thumb.y as f64 && y < self.thumb.bottom() as f64 {
+            y - self.thumb.y as f64
+        } else {
+            self.thumb.h as f64 / 2.0
+        }
+    }
+
+    /// The scroll offset that puts the grabbed point of the thumb at a
+    /// pointer Y.
+    ///
+    /// # Arguments
+    /// * `y` - Pointer Y.
+    /// * `grab` - The offset into the thumb the press grabbed.
+    pub fn scroll_at(&self, y: f64, grab: f64) -> f64 {
+        let travel = (self.track.h - 2 * THUMB_INSET - self.thumb.h) as f64;
+        if travel <= 0.0 {
+            return 0.0;
+        }
+        let top = y - grab - (self.track.y + THUMB_INSET) as f64;
+        (top / travel * self.max).clamp(0.0, self.max)
+    }
+
+    /// Draws the thumb, stronger while the pointer is on it or drags it.
+    ///
+    /// # Arguments
+    /// * `canvas` - The target.
+    /// * `active` - Whether the thumb is hovered or dragged.
+    pub fn draw(&self, canvas: &mut Canvas<'_>, active: bool) {
+        let radius = self.thumb.w as f32 / 2.0;
+        canvas.fill_rounded(self.thumb, radius, text_alpha(if active { 0x80 } else { 0x48 }));
+    }
+}
+
 /// Draws a popup's rounded background with its border.
 ///
 /// # Arguments
 /// * `canvas` - The target.
 /// * `rect` - The popup's rectangle.
 pub fn draw_popup_frame(canvas: &mut Canvas<'_>, rect: Rect) {
-    canvas.fill_rounded(rect, POPUP_RADIUS, popup_bg());
-    canvas.stroke_rounded(rect, POPUP_RADIUS, 1.0, popup_border());
+    let radius = popup_radius();
+    fill_surface(canvas, rect, radius, popup_bg());
+    canvas.stroke_rounded(rect, radius, 1.0, popup_border());
 }
 
 /// Shapes text so it fits a width, replacing the tail with an ellipsis when it

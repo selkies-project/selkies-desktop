@@ -128,8 +128,8 @@ pub fn draw(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
         let selected = d.desktop_selection == Some(index);
         let hovered = d.hover == Hover::DesktopIcon(index);
         if selected {
-            canvas.fill_rounded(cell, 8.0, rgba(0xff, 0xff, 0xff, 0x40));
-            canvas.stroke_rounded(cell, 8.0, 1.0, rgba(0xff, 0xff, 0xff, 0x60));
+            canvas.fill_rounded(cell, 8.0, ui::accent_alpha(0x55));
+            canvas.stroke_rounded(cell, 8.0, 1.0, ui::accent_alpha(0x90));
         } else if hovered {
             canvas.fill_rounded(cell, 8.0, rgba(0xff, 0xff, 0xff, 0x22));
         }
@@ -157,7 +157,7 @@ pub fn draw(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     }
 }
 
-/// Draws a label with a dark shadow so it reads on any wallpaper.
+/// Draws a label with a contrasting shadow so it reads on any wallpaper.
 fn draw_shadowed(canvas: &mut Canvas<'_>, fonts: &mut Fonts, text: &Rc<Text>, cell: Rect, center_y: i32) {
     canvas.draw_text(
         fonts,
@@ -166,7 +166,7 @@ fn draw_shadowed(canvas: &mut Canvas<'_>, fonts: &mut Fonts, text: &Rc<Text>, ce
         center_y + 1,
         cell.w,
         Align::Center,
-        rgba(0, 0, 0, 0xa0),
+        ui::text_shadow(),
     );
     canvas.draw_text(fonts, text, cell.x, center_y, cell.w, Align::Center, ui::text());
 }

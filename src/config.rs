@@ -84,6 +84,80 @@ pub enum PanelPosition {
     Top,
 }
 
+/// How the title bars of windows, the bar and the popups are shaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// One flat color.
+    Flat,
+    /// A soft gradient, lighter at the top.
+    Gradient,
+    /// A gloss: a lighter upper half over a darker lower half.
+    Glossy,
+}
+
+/// Which side of a title bar the window buttons sit on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonSide {
+    /// At the right, the Linux and Windows way.
+    Right,
+    /// At the left, the macOS way.
+    Left,
+}
+
+/// The shapes of the window buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyphs {
+    /// Thin line glyphs in square buttons.
+    Lines,
+    /// Colored circles.
+    Circles,
+    /// Thin line glyphs in wide flat buttons, the title at the left.
+    Wide,
+}
+
+/// How the start menu lays its applications out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuLayout {
+    /// The categories in a column and the chosen one's applications in rows.
+    Columns,
+    /// The categories in a column and the applications as a grid of icons.
+    Grid,
+    /// Every application in a list, with the favorites as tiles beside it.
+    Tiles,
+}
+
+/// The look of window frames, which the bar and the popups follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowStyle {
+    /// Whether the window manager's frames and menus are themed at all.
+    pub decorate: bool,
+    /// How title bars are shaded.
+    pub surface: Surface,
+    /// Which side the buttons sit on.
+    pub buttons: ButtonSide,
+    /// The shapes of the buttons.
+    pub glyphs: Glyphs,
+    /// Corner radius of windows and popups in logical pixels.
+    pub corners: i32,
+}
+
+impl Default for WindowStyle {
+    fn default() -> WindowStyle {
+        WindowStyle {
+            decorate: true,
+            surface: Surface::Flat,
+            buttons: ButtonSide::Right,
+            glyphs: Glyphs::Lines,
+            corners: DEFAULT_CORNERS,
+        }
+    }
+}
+
+/// Corner radius of windows and popups unless set otherwise.
+pub const DEFAULT_CORNERS: i32 = 8;
+/// Largest corner radius the settings accept.
+pub const MAX_CORNERS: i32 = 12;
+
 /// Everything the user can set.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -99,10 +173,22 @@ pub struct Config {
     pub panel_autohide: bool,
     /// Icon name or image path of the start button, or `None` for the Selkies logo.
     pub start_icon: Option<String>,
+    /// Text shown on the start button beside its icon, if any.
+    pub start_label: Option<String>,
+    /// Whether the start button, quick launch and taskbar sit in the middle
+    /// of the bar rather than at its left.
+    pub panel_centered: bool,
+    /// Space between the bar and the screen edges in logical pixels, which
+    /// floats it.
+    pub panel_margin: i32,
+    /// How the start menu lays its applications out.
+    pub menu_layout: MenuLayout,
     /// Language code of the interface, or `None` to follow the environment.
     pub language: Option<String>,
     /// The colors of the interface.
     pub theme: crate::ui::Theme,
+    /// The look of window frames, the bar and the popups.
+    pub window: WindowStyle,
     /// Desktop file IDs of the quick launch buttons beside the start button.
     pub launchers: Vec<String>,
     /// Whether the system tray is shown.
@@ -146,8 +232,13 @@ impl Default for Config {
             panel_opacity: 95,
             panel_autohide: false,
             start_icon: None,
+            start_label: None,
+            panel_centered: false,
+            panel_margin: 0,
+            menu_layout: MenuLayout::Columns,
             language: None,
             theme: crate::ui::Theme::default(),
+            window: WindowStyle::default(),
             launchers: Vec::new(),
             show_tray: true,
             files_list: false,
@@ -222,6 +313,8 @@ pub fn data_dirs() -> Vec<PathBuf> {
 pub const MIN_PANEL_HEIGHT: i32 = 24;
 /// Tallest bar the settings accept.
 pub const MAX_PANEL_HEIGHT: i32 = 64;
+/// Widest margin around the bar the settings accept.
+pub const MAX_PANEL_MARGIN: i32 = 16;
 
 /// The desktop file ID of the built-in file manager, the default favorite.
 pub const FILES_ENTRY: &str = "selkies-desktop-files.desktop";
@@ -297,6 +390,29 @@ impl Config {
             .filter(|v| !v.is_empty())
         {
             config.start_icon = Some(icon.to_string());
+        }
+        if let Some(label) = values
+            .get("start_label")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            config.start_label = Some(label.to_string());
+        }
+        if let Some(layout) = values.get("panel_layout").map(|v| v.trim().to_ascii_lowercase()) {
+            config.panel_centered = layout == "centered" || layout == "center";
+        }
+        if let Some(margin) = values
+            .get("panel_margin")
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<i32>().ok())
+        {
+            config.panel_margin = margin.clamp(0, MAX_PANEL_MARGIN);
+        }
+        if let Some(layout) = values.get("menu_layout").map(|v| v.trim().to_ascii_lowercase()) {
+            config.menu_layout = match layout.as_str() {
+                "grid" => MenuLayout::Grid,
+                "tiles" => MenuLayout::Tiles,
+                _ => MenuLayout::Columns,
+            };
         }
         if let Some(width) = values
             .get("panel_width")
@@ -378,6 +494,40 @@ impl Config {
         if let Some(language) = values.get("language").map(|v| v.trim()).filter(|v| !v.is_empty()) {
             config.language = Some(language.to_string());
         }
+        config.window.decorate = truthy("theme_windows", config.window.decorate);
+        if let Some(surface) = values
+            .get("window_surface")
+            .map(|v| v.trim().to_ascii_lowercase())
+        {
+            config.window.surface = match surface.as_str() {
+                "gradient" => Surface::Gradient,
+                "glossy" => Surface::Glossy,
+                _ => Surface::Flat,
+            };
+        }
+        if let Some(side) = values
+            .get("window_buttons")
+            .map(|v| v.trim().to_ascii_lowercase())
+        {
+            config.window.buttons = if side == "left" {
+                ButtonSide::Left
+            } else {
+                ButtonSide::Right
+            };
+        }
+        if let Some(glyphs) = values.get("window_glyphs").map(|v| v.trim().to_ascii_lowercase()) {
+            config.window.glyphs = match glyphs.as_str() {
+                "circles" => Glyphs::Circles,
+                "wide" => Glyphs::Wide,
+                _ => Glyphs::Lines,
+            };
+        }
+        if let Some(corners) = values
+            .get("window_corners")
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<i32>().ok())
+        {
+            config.window.corners = corners.clamp(0, MAX_CORNERS);
+        }
         config.files_hidden = truthy("files_hidden", config.files_hidden);
         if let Some(list) = values.get("favorites") {
             config.favorites = id_list(list);
@@ -426,13 +576,17 @@ impl Config {
 pub const WALLPAPER_KEYS: [&str; 4] = ["background_style", "background", "wallpaper", "wallpaper_mode"];
 
 /// The keys of the bar's and the start menu's settings, which share a page.
-pub const PANEL_KEYS: [&str; 14] = [
+pub const PANEL_KEYS: [&str; 18] = [
     "panel_position",
     "panel_height",
     "panel_width",
     "panel_opacity",
     "panel_autohide",
+    "panel_layout",
+    "panel_margin",
     "start_icon",
+    "start_label",
+    "menu_layout",
     "show_clock",
     "show_volume",
     "show_desktop_button",
@@ -445,6 +599,15 @@ pub const PANEL_KEYS: [&str; 14] = [
 
 /// The keys of the interface colors.
 pub const COLOR_KEYS: [&str; 4] = ["color_accent", "color_panel", "color_popup", "color_text"];
+
+/// The keys of the window frame settings.
+pub const WINDOW_KEYS: [&str; 5] = [
+    "theme_windows",
+    "window_surface",
+    "window_buttons",
+    "window_glyphs",
+    "window_corners",
+];
 
 /// The keys of the file manager's settings.
 pub const FILES_KEYS: [&str; 3] = ["files_view", "files_sort", "files_hidden"];
@@ -654,5 +817,30 @@ mod tests {
         assert_eq!(second.mode, WallpaperMode::Center);
         assert_eq!(second.image, None);
         assert!(config.monitors.contains_key(&2));
+    }
+
+    #[test]
+    fn builds_window_style() {
+        let mut values = HashMap::new();
+        values.insert("window_surface".to_string(), "Glossy".to_string());
+        values.insert("window_buttons".to_string(), "left".to_string());
+        values.insert("window_glyphs".to_string(), "circles".to_string());
+        values.insert("window_corners".to_string(), "40".to_string());
+        values.insert("theme_windows".to_string(), "no".to_string());
+        values.insert("panel_layout".to_string(), "Centered".to_string());
+        values.insert("panel_margin".to_string(), "8px".to_string());
+        values.insert("menu_layout".to_string(), "grid".to_string());
+        values.insert("start_label".to_string(), " Start ".to_string());
+        let config = Config::from_values(&values);
+        assert!(config.panel_centered);
+        assert_eq!(config.panel_margin, 8);
+        assert_eq!(config.menu_layout, MenuLayout::Grid);
+        assert_eq!(config.start_label.as_deref(), Some("Start"));
+        assert_eq!(config.window.surface, Surface::Glossy);
+        assert_eq!(config.window.buttons, ButtonSide::Left);
+        assert_eq!(config.window.glyphs, Glyphs::Circles);
+        assert_eq!(config.window.corners, MAX_CORNERS);
+        assert!(!config.window.decorate);
+        assert_eq!(Config::default().window, WindowStyle::default());
     }
 }

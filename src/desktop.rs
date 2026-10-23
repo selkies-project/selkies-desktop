@@ -161,8 +161,10 @@ pub enum Hover {
     ShowDesktop,
     /// A menu category row.
     MenuCategory(usize),
-    /// A menu application row.
+    /// A menu application row, or a cell of the application grid.
     MenuApp(usize),
+    /// A favorite's tile in the menu's tiles layout.
+    MenuTile(usize),
     /// An item of the task context menu.
     TaskMenuItem(usize),
     /// An item of the bar's right-click menu.
@@ -260,6 +262,9 @@ pub struct Desktop {
     /// Where the panel surface's top-left corner sits in the primary
     /// background's logical coordinates, for that blending.
     pub panel_offset: (i32, i32),
+    /// The wallpaper image shrunk for the settings window's theme preview,
+    /// with the path and scale it was made for.
+    pub preview_wallpaper: Option<(std::path::PathBuf, i32, Rc<Pixmap>)>,
     /// Icons docked in the system tray.
     pub tray_icons: usize,
     /// The strip of the bar the tray icons occupy, in panel coordinates.
@@ -274,6 +279,8 @@ impl Desktop {
         let config = Config::load();
         crate::i18n::select(config.language.as_deref());
         ui::set_theme(config.theme);
+        ui::set_style(config.window);
+        crate::wmtheme::apply(&config);
         let fonts = Fonts::new();
         let icons = Icons::new(config.icon_theme.as_deref());
         if config.files_manager {
@@ -318,16 +325,29 @@ impl Desktop {
             preview: None,
             opaque_output: false,
             panel_offset: (0, 0),
+            preview_wallpaper: None,
             tray_icons: 0,
             tray_slot: None,
             tray_moved: false,
         };
-        desktop.requests.push(Request::Panel {
-            top: desktop.panel_top(),
-            height: desktop.config.panel_height,
-            autohide: desktop.config.panel_autohide,
-        });
+        desktop.requests.push(desktop.panel_request());
         desktop
+    }
+
+    /// The space the bar reserves along its edge: its height and the margin
+    /// that floats it.
+    pub fn reserved_height(&self) -> i32 {
+        self.config.panel_height + self.config.panel_margin
+    }
+
+    /// The request that places the bar as the settings have it.
+    fn panel_request(&self) -> Request {
+        Request::Panel {
+            top: self.panel_top(),
+            height: self.reserved_height(),
+            autohide: self.config.panel_autohide,
+            margin: self.config.panel_margin,
+        }
     }
 
     /// Whether the bar is tucked away at the moment.
@@ -372,11 +392,12 @@ impl Desktop {
         }
     }
 
-    /// Applies a bar setting on screen without writing it, while a slider is
-    /// dragged.
+    /// Applies a bar or window setting on screen without writing it, while
+    /// a slider is dragged.
     ///
     /// # Arguments
-    /// * `key` - `panel_height`, `panel_width` or `panel_opacity`.
+    /// * `key` - `panel_height`, `panel_width`, `panel_opacity`,
+    ///   `panel_margin` or `window_corners`.
     /// * `value` - The value.
     pub fn preview_panel(&mut self, key: &str, value: i32) {
         let rest = if key == "panel_width" {
@@ -404,13 +425,15 @@ impl Desktop {
         };
         let (was_top, was_height, was_autohide) = (
             self.panel_top(),
-            self.config.panel_height,
+            self.reserved_height(),
             self.config.panel_autohide,
         );
         match key.as_str() {
             "panel_height" => self.config.panel_height = value,
             "panel_width" => self.config.panel_width = value,
             "panel_opacity" => self.config.panel_opacity = value,
+            "panel_margin" => self.config.panel_margin = value,
+            "window_corners" => self.config.window.corners = value,
             _ => return,
         }
         self.sync_panel(was_top, was_height, was_autohide);
@@ -450,17 +473,19 @@ impl Desktop {
         icon
     }
 
-    /// Tells the backend where the bar goes when the edge, height or hiding changed.
+    /// Tells the backend where the bar goes when the edge, reserved height
+    /// or hiding changed.
+    ///
+    /// # Arguments
+    /// * `was_top` - Whether the bar sat along the top edge before.
+    /// * `was_height` - The height it reserved before, margin included.
+    /// * `was_autohide` - Whether it hid before.
     fn sync_panel(&mut self, was_top: bool, was_height: i32, was_autohide: bool) {
         if self.panel_top() != was_top
-            || self.config.panel_height != was_height
+            || self.reserved_height() != was_height
             || self.config.panel_autohide != was_autohide
         {
-            self.requests.push(Request::Panel {
-                top: self.panel_top(),
-                height: self.config.panel_height,
-                autohide: self.config.panel_autohide,
-            });
+            self.requests.push(self.panel_request());
             self.redraw_backgrounds();
         }
         if !self.config.panel_autohide {
@@ -469,6 +494,7 @@ impl Desktop {
         }
         crate::i18n::select(self.config.language.as_deref());
         ui::set_theme(self.config.theme);
+        ui::set_style(self.config.window);
         self.fonts.clear_cache();
         self.menu.invalidate();
         self.redraw_backgrounds();
@@ -569,11 +595,12 @@ impl Desktop {
     pub fn reload(&mut self) {
         let (was_top, was_height, was_autohide) = (
             self.panel_top(),
-            self.config.panel_height,
+            self.reserved_height(),
             self.config.panel_autohide,
         );
         self.config = Config::load();
         self.sync_panel(was_top, was_height, was_autohide);
+        crate::wmtheme::apply(&self.config);
         self.icons = Icons::new(self.config.icon_theme.as_deref());
         self.apps = Apps::load(&self.config);
         self.wallpapers.clear();
@@ -584,10 +611,7 @@ impl Desktop {
         self.menu.invalidate();
         self.desktop_selection = None;
         self.panel_dirty = true;
-        for background in &mut self.backgrounds {
-            background.wallpaper_cache = None;
-            background.dirty = true;
-        }
+        self.repaint_wallpapers();
     }
 
     /// Reads the settings again and applies what changed on screen, without
@@ -595,16 +619,14 @@ impl Desktop {
     pub fn apply_config(&mut self) {
         let (was_top, was_height, was_autohide) = (
             self.panel_top(),
-            self.config.panel_height,
+            self.reserved_height(),
             self.config.panel_autohide,
         );
         self.config = Config::load();
         self.sync_panel(was_top, was_height, was_autohide);
+        crate::wmtheme::apply(&self.config);
         self.wallpapers.retain(|_, image| image.is_some());
-        for background in &mut self.backgrounds {
-            background.wallpaper_cache = None;
-            background.dirty = true;
-        }
+        self.repaint_wallpapers();
         self.panel_dirty = true;
     }
 
@@ -676,6 +698,15 @@ impl Desktop {
         }
     }
 
+    /// Paints the wallpapers again from the settings, dropping the layers
+    /// cached with the old color and image.
+    pub fn repaint_wallpapers(&mut self) {
+        for background in &mut self.backgrounds {
+            background.wallpaper_cache = None;
+            background.dirty = true;
+        }
+    }
+
     /// Takes the requests the handled events produced.
     pub fn take_requests(&mut self) -> Vec<Request> {
         std::mem::take(&mut self.requests)
@@ -686,15 +717,19 @@ impl Desktop {
         self.config.panel_position == crate::config::PanelPosition::Top
     }
 
-    /// The bar's rectangle in panel surface coordinates.
+    /// The bar's rectangle in panel surface coordinates: its width a share
+    /// of the screen's, centered, and pulled in from the edges by its
+    /// margin.
     pub fn bar_rect(&self) -> Rect {
         let height = self.config.panel_height;
-        let width = (self.panel.width * self.config.panel_width / 100).max(1);
-        let x = (self.panel.width - width) / 2;
+        let margin = self.config.panel_margin;
+        let usable = (self.panel.width - 2 * margin).max(1);
+        let width = (usable * self.config.panel_width / 100).max(1);
+        let x = margin + (usable - width) / 2;
         if self.panel_top() {
-            return Rect::new(x, 0, width, height);
+            return Rect::new(x, margin, width, height);
         }
-        Rect::new(x, self.panel.height - height, width, height)
+        Rect::new(x, self.panel.height - height - margin, width, height)
     }
 
     /// Whether the window at an index exists.
@@ -1132,6 +1167,11 @@ impl Desktop {
                 let entry = &self.apps.entries[entry];
                 entry.comment.clone().filter(|c| c != &entry.name)
             }
+            Hover::MenuTile(i) => {
+                let entry = *menu::favorite_entries(self).get(i)?;
+                let entry = &self.apps.entries[entry];
+                entry.comment.clone().filter(|c| c != &entry.name)
+            }
             _ => None,
         }
     }
@@ -1347,8 +1387,8 @@ impl Desktop {
                     popups::volume_drag(self, x);
                     return;
                 }
-                if self.settings.drag.is_some() {
-                    settings::drag(self, x);
+                if self.settings.dragging() {
+                    settings::drag(self, x, y);
                     return;
                 }
                 let hover = match self.popup {
@@ -1398,7 +1438,7 @@ impl Desktop {
             if self.volume_drag {
                 self.volume_drag = false;
             }
-            if self.settings.drag.is_some() {
+            if self.settings.dragging() {
                 settings::release(self);
             }
             return;
@@ -1517,7 +1557,7 @@ impl Desktop {
                 if self.popup == Popup::None
                     || !matches!(
                         self.hover,
-                        Hover::MenuApp(_) | Hover::MenuCategory(_) | Hover::Control(_)
+                        Hover::MenuApp(_) | Hover::MenuTile(_) | Hover::MenuCategory(_) | Hover::Control(_)
                     )
                 {
                     self.set_hover(Hover::None);
@@ -1536,7 +1576,11 @@ impl Desktop {
     fn key(&mut self, key: Key) {
         match key {
             Key::Super => self.toggle_menu(),
-            Key::Escape => self.close_popup(),
+            Key::Escape => {
+                if self.popup != Popup::Settings || !settings::escape(self) {
+                    self.close_popup();
+                }
+            }
             _ => match self.popup {
                 Popup::Menu => menu::key(self, key),
                 Popup::Calendar => popups::calendar_key(self, key),

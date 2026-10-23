@@ -2,9 +2,15 @@
 //! pages on the left and the page's settings on the right, in captioned
 //! cards with one setting per row, its name on the left and its control on
 //! the right.  The Panel page holds the bar and the start menu, the Files
-//! page the file manager, and the Desktop page the wallpaper of every
-//! monitor, shared or one by one, and the colors of the interface.  Every
-//! change is written to the config file at once, which the desktop then
+//! page the file manager, the Desktop page the wallpaper of every monitor,
+//! shared or one by one, and the Theme page the colors of the interface and
+//! the look of window frames: a preview of the desktop as it would be, a
+//! dark and a light scheme, three styles of frame, the four colors each
+//! from a row of presets or from a picker with a spectrum and a hex field
+//! that opens over the page and shows the color on screen as it is dragged,
+//! and the shading, buttons and corners of windows one by one.  A style
+//! also sets the bar's layout and margin and the start menu's layout, which
+//! live on the Panel page.  Every change is written to the config file at once, which the desktop then
 //! reads back, so the file stays the one source of the settings.  Images
 //! are chosen through the file manager in its picker form, and applications
 //! for the quick launch and favorites lists from a list that opens in place.
@@ -13,18 +19,19 @@
 use tiny_skia::{Color, PathBuilder};
 
 use crate::config::{
-    self, BackgroundStyle, COLOR_KEYS, FILES_KEYS, PANEL_KEYS, WALLPAPER_KEYS, WallpaperMode,
+    self, BackgroundStyle, ButtonSide, COLOR_KEYS, Config, FILES_KEYS, Glyphs, MenuLayout, PANEL_KEYS,
+    Surface, WALLPAPER_KEYS, WINDOW_KEYS, WallpaperMode,
 };
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::event::Button;
 use crate::geom::Rect;
 use crate::i18n::tr;
-use crate::render::{Align, Canvas, parse_color};
-use crate::ui::{self, popups};
+use crate::render::{Align, Canvas, color_to_hsv, hsv_to_color, parse_color};
+use crate::ui::{self, popups, preview};
 use crate::xkb::Key;
 
-/// Settings window width.
-const WIDTH: i32 = 700;
+/// Settings window width, with a gutter for the page's scrollbar.
+const WIDTH: i32 = 700 + ui::SCROLLBAR;
 /// Settings window height, grown when a page needs more and the screen has it.
 const HEIGHT: i32 = 460;
 /// Inner padding of the window.
@@ -71,13 +78,28 @@ const KNOB: i32 = 16;
 const FIELD_WIDTH: i32 = 200;
 /// The least width a text field shrinks to for the buttons beside it.
 const FIELD_MIN_WIDTH: i32 = 120;
-/// Width of a color's hex field.
-const COLOR_FIELD_WIDTH: i32 = 84;
+/// Width of the swatch of a color's current value, which opens its picker.
+const PICKER_BUTTON: i32 = 30;
+/// Width of the color picker.
+const PICKER_WIDTH: i32 = 216;
+/// Inner padding of the color picker.
+const PICKER_PAD: i32 = 8;
+/// Height of the picker's saturation and value square.
+const PICKER_AREA: i32 = 140;
+/// Height of the picker's hue strip.
+const PICKER_HUE: i32 = 16;
+/// Width of the picker's hex field.
+const PICKER_FIELD_WIDTH: i32 = 96;
+/// Radius of the ring marking the chosen point on the picker's square.
+const PICKER_MARK: f32 = 6.0;
+/// Height of the color picker.
+const PICKER_HEIGHT: i32 = PICKER_AREA + PICKER_HUE + CONTROL + 4 * PICKER_PAD;
 /// Side of a color swatch.
 const SWATCH: i32 = 22;
 
-/// The sliders of the panel page: key, lowest, highest, step and unit.
-const SLIDERS: [(&str, i32, i32, i32, &str); 3] = [
+/// The sliders of the Panel and Theme pages: key, lowest, highest, step
+/// and unit.
+const SLIDERS: [(&str, i32, i32, i32, &str); 5] = [
     (
         "panel_height",
         config::MIN_PANEL_HEIGHT,
@@ -87,23 +109,125 @@ const SLIDERS: [(&str, i32, i32, i32, &str); 3] = [
     ),
     ("panel_width", 20, 100, 5, "%"),
     ("panel_opacity", 0, 100, 5, "%"),
+    ("panel_margin", 0, config::MAX_PANEL_MARGIN, 2, "px"),
+    ("window_corners", 0, config::MAX_CORNERS, 1, "px"),
 ];
 
+/// The color schemes: the four colors of each, as accent, bar, menus and
+/// text.
+const SCHEMES: [(&str, [&str; 4]); 2] = [
+    ("Dark", ["#7967c5", "#0a0e17", "#121826", "#eef2f8"]),
+    ("Light", ["#6b5bd6", "#e4e7ee", "#f5f6f9", "#1b2030"]),
+];
+
+/// A style: a name and the frame, bar and menu settings it bundles.
+struct Style {
+    name: &'static str,
+    surface: Surface,
+    buttons: ButtonSide,
+    glyphs: Glyphs,
+    corners: i32,
+    centered: bool,
+    margin: i32,
+    menu: MenuLayout,
+}
+
+impl Style {
+    /// Whether every setting of the style is in effect.
+    fn matches(&self, config: &Config) -> bool {
+        let window = config.window;
+        window.surface == self.surface
+            && window.buttons == self.buttons
+            && window.glyphs == self.glyphs
+            && window.corners == self.corners
+            && config.panel_centered == self.centered
+            && config.panel_margin == self.margin
+            && config.menu_layout == self.menu
+    }
+
+    /// The keys and values the style writes.
+    fn changes(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("window_surface", surface_value(self.surface).to_string()),
+            (
+                "window_buttons",
+                match self.buttons {
+                    ButtonSide::Right => "right",
+                    ButtonSide::Left => "left",
+                }
+                .to_string(),
+            ),
+            ("window_glyphs", glyphs_value(self.glyphs).to_string()),
+            ("window_corners", self.corners.to_string()),
+            (
+                "panel_layout",
+                if self.centered { "centered" } else { "left" }.to_string(),
+            ),
+            ("panel_margin", self.margin.to_string()),
+            ("menu_layout", menu_value(self.menu).to_string()),
+        ]
+    }
+}
+
+/// The styles: the Linux desktop as it is, the Fruit look with a floating
+/// dock, circle buttons and a grid of applications, and the Redmond look
+/// with square frames, wide buttons and a tiled start menu.
+const STYLES: [Style; 3] = [
+    Style {
+        name: "Linux",
+        surface: Surface::Flat,
+        buttons: ButtonSide::Right,
+        glyphs: Glyphs::Lines,
+        corners: 8,
+        centered: false,
+        margin: 0,
+        menu: MenuLayout::Columns,
+    },
+    Style {
+        name: "Fruit",
+        surface: Surface::Glossy,
+        buttons: ButtonSide::Left,
+        glyphs: Glyphs::Circles,
+        corners: 10,
+        centered: false,
+        margin: 8,
+        menu: MenuLayout::Grid,
+    },
+    Style {
+        name: "Redmond",
+        surface: Surface::Flat,
+        buttons: ButtonSide::Right,
+        glyphs: Glyphs::Wide,
+        corners: 0,
+        centered: false,
+        margin: 0,
+        menu: MenuLayout::Tiles,
+    },
+];
+
+/// Space above and below the preview inside its card.
+const PREVIEW_PAD: i32 = 10;
+
 /// Preset background colors, true black first.
-const SWATCHES: [&str; 8] = [
-    "#000000", "#101418", "#1d222b", "#2b2b2b", "#1e2a3a", "#243b2f", "#3b2d4a", "#5a5a5a",
+const SWATCHES: [&str; 12] = [
+    "#000000", "#101418", "#1d222b", "#2b2b2b", "#1e2a3a", "#243b2f", "#3b2d4a", "#5a5a5a", "#0b1f3a",
+    "#2d1b33", "#4a2b1a", "#1a1a2e",
 ];
 /// Preset accent colors, the default first.
-const ACCENTS: [&str; 8] = [
-    "#7967c5", "#9d8cf0", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99",
+const ACCENTS: [&str; 12] = [
+    "#7967c5", "#9d8cf0", "#3d7dd6", "#2f9e6e", "#d5499a", "#e0803a", "#d64545", "#8a8f99", "#1fa8b8",
+    "#c9a227", "#6c8ebf", "#b56576",
 ];
-/// Preset surface colors for the bar and the menus, the defaults first.
-const SURFACES: [&str; 8] = [
-    "#0a0e17", "#121826", "#000000", "#1d222b", "#2b2b2b", "#1e2a3a", "#3b2d4a", "#f2f3f5",
+/// Preset surface colors for the bar and the menus, the defaults first and
+/// the light ones last.
+const SURFACES: [&str; 12] = [
+    "#0a0e17", "#121826", "#000000", "#1d222b", "#2b2b2b", "#1e2a3a", "#3b2d4a", "#2e3440", "#e4e7ee",
+    "#f5f6f9", "#f2f3f5", "#fdf6e3",
 ];
-/// Preset text colors, the default first.
-const TEXTS: [&str; 8] = [
-    "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#333333", "#111111",
+/// Preset text colors, the default first and the dark ones last.
+const TEXTS: [&str; 12] = [
+    "#eef2f8", "#ffffff", "#d0d4da", "#b6c0d2", "#f5e6c8", "#c8e6ff", "#ffd166", "#93a1a1", "#586e75",
+    "#333333", "#1b2030", "#111111",
 ];
 
 /// The pages of the window.
@@ -113,13 +237,15 @@ pub enum Page {
     Panel,
     /// The file manager.
     Files,
-    /// The wallpaper and the colors.
+    /// The wallpaper.
     Desktop,
+    /// The colors and the window frames.
+    Theme,
 }
 
 impl Page {
     /// Every page in order.
-    const ALL: [Page; 3] = [Page::Panel, Page::Files, Page::Desktop];
+    const ALL: [Page; 4] = [Page::Panel, Page::Files, Page::Desktop, Page::Theme];
 
     /// The page's name.
     fn name(self) -> &'static str {
@@ -127,6 +253,7 @@ impl Page {
             Page::Panel => tr("Panel"),
             Page::Files => tr("Files"),
             Page::Desktop => tr("Desktop"),
+            Page::Theme => tr("Theme"),
         }
     }
 }
@@ -200,6 +327,8 @@ pub enum Field {
     ClockFormat,
     /// The start button's icon name or image path.
     StartIcon,
+    /// The start button's label.
+    StartLabel,
     /// The wallpaper image path.
     Image,
     /// The background color.
@@ -239,6 +368,12 @@ enum Action {
     Reset,
     /// Drag a slider for a key.
     Slide(&'static str),
+    /// Open the color picker of a field, or close it when it is open.
+    OpenPicker(Field),
+    /// Press on the picker's hue strip.
+    Hue,
+    /// Press on the picker's saturation and value square.
+    Area,
 }
 
 /// How a control is drawn.
@@ -264,6 +399,13 @@ enum Kind {
     AppRow,
     /// A slider; the label is the value shown.
     Slider,
+    /// The swatch of a color's current value, with an eyedropper on it, that
+    /// opens its picker.
+    Picker,
+    /// The picker's hue strip.
+    HueStrip,
+    /// The picker's saturation and value square.
+    ColorArea,
 }
 
 /// One clickable thing in the window.
@@ -306,8 +448,25 @@ struct Layout {
     cards: Vec<Rect>,
     /// Hairlines between rows.
     lines: Vec<Rect>,
+    /// Where the theme preview is drawn, when the page has it.
+    previews: Vec<Rect>,
     /// Height of the page's content before scrolling.
     content: i32,
+    /// The open color picker, laid over the page.
+    picker: Option<PickerLayout>,
+}
+
+/// Where the open color picker is.
+#[derive(Clone, Copy, Debug)]
+struct PickerLayout {
+    /// The picker's frame.
+    frame: Rect,
+    /// The saturation and value square.
+    area: Rect,
+    /// The hue strip.
+    hue: Rect,
+    /// Index of the picker's first control; the ones before belong to the page.
+    first: usize,
 }
 
 /// The window's state between events.
@@ -326,6 +485,31 @@ pub struct SettingsState {
     pub scroll: f64,
     /// The slider being dragged, with its value so far.
     pub drag: Option<(&'static str, i32)>,
+    /// The color picker open for a field, if any.
+    pub picker: Option<Picker>,
+    /// The scrollbar thumb being dragged, as the offset into it grabbed.
+    pub bar_drag: Option<f64>,
+}
+
+/// The color picker of a field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Picker {
+    /// The color field picked for.
+    pub field: Field,
+    /// The color as hue in degrees, saturation and value, kept apart from
+    /// the setting so a gray or a black keeps its hue while dragging.
+    pub hsv: (f32, f32, f32),
+    /// The part of the picker being dragged, if any.
+    pub drag: Option<PickerPart>,
+}
+
+/// A draggable part of the color picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerPart {
+    /// The hue strip.
+    Hue,
+    /// The saturation and value square.
+    Area,
 }
 
 impl Default for SettingsState {
@@ -338,6 +522,8 @@ impl Default for SettingsState {
             editing: String::new(),
             scroll: 0.0,
             drag: None,
+            picker: None,
+            bar_drag: None,
         }
     }
 }
@@ -351,6 +537,8 @@ impl SettingsState {
         self.editing.clear();
         self.scroll = 0.0;
         self.drag = None;
+        self.picker = None;
+        self.bar_drag = None;
     }
 
     /// Clears the state when the window closes.
@@ -359,6 +547,16 @@ impl SettingsState {
         self.picking = None;
         self.editing.clear();
         self.drag = None;
+        self.picker = None;
+        self.bar_drag = None;
+    }
+
+    /// Whether a slider, a part of the color picker or the scrollbar is
+    /// being dragged.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+            || self.bar_drag.is_some()
+            || self.picker.is_some_and(|picker| picker.drag.is_some())
     }
 }
 
@@ -535,12 +733,13 @@ fn frame(d: &Desktop) -> Rect {
 }
 
 /// The page area to the right of the page column, for a frame: below the
-/// title and above the footer with the Reset or Back button.
+/// title, above the footer with the Reset or Back button, and short of the
+/// gutter its scrollbar sits in.
 fn page_rect_in(frame: Rect) -> Rect {
     let x = frame.x + PAD + NAV_WIDTH + PAD;
     let y = frame.y + PAD + CONTROL + 10;
     let bottom = frame.bottom() - PAD - CONTROL - 10;
-    Rect::new(x, y, frame.right() - PAD - x, bottom - y)
+    Rect::new(x, y, frame.right() - PAD - ui::SCROLLBAR - x, bottom - y)
 }
 
 /// The wallpaper the page shows: the monitor's, or the shared one.
@@ -566,13 +765,22 @@ fn field_text(d: &Desktop, field: Field) -> String {
     match field {
         Field::ClockFormat => d.config.clock_format.clone(),
         Field::StartIcon => d.config.start_icon.clone().unwrap_or_default(),
+        Field::StartLabel => d.config.start_label.clone().unwrap_or_default(),
         Field::Image => shown_wallpaper(d)
             .image
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
-        Field::Color => hex(shown_wallpaper(d).color),
-        Field::Theme(color) => hex(color.current(d.config.theme)),
+        Field::Color | Field::Theme(_) => hex(field_color(d, field)),
+    }
+}
+
+/// The color a color field is set to; black for a field that is not one.
+fn field_color(d: &Desktop, field: Field) -> Color {
+    match field {
+        Field::Color => shown_wallpaper(d).color,
+        Field::Theme(color) => color.current(d.config.theme),
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => Color::BLACK,
     }
 }
 
@@ -598,11 +806,68 @@ fn page_keys(d: &Desktop) -> Vec<&'static str> {
     match d.settings.page {
         Page::Panel => PANEL_KEYS.to_vec(),
         Page::Files => FILES_KEYS.to_vec(),
-        Page::Desktop => WALLPAPER_KEYS
-            .iter()
-            .map(|k| wallpaper_key(d, k))
-            .chain(COLOR_KEYS)
-            .collect(),
+        Page::Desktop => WALLPAPER_KEYS.iter().map(|k| wallpaper_key(d, k)).collect(),
+        Page::Theme => COLOR_KEYS.iter().chain(WINDOW_KEYS.iter()).copied().collect(),
+    }
+}
+
+/// The scheme whose four colors are set, by name.
+fn current_scheme(theme: ui::Theme) -> Option<&'static str> {
+    let current = [theme.accent, theme.panel, theme.popup, theme.text].map(hex);
+    SCHEMES
+        .iter()
+        .find(|(_, colors)| {
+            colors
+                .iter()
+                .zip(&current)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+        .map(|(name, _)| *name)
+}
+
+/// The style whose settings are all in effect, by name.
+fn current_style(config: &Config) -> Option<&'static str> {
+    STYLES
+        .iter()
+        .find(|style| style.matches(config))
+        .map(|style| style.name)
+}
+
+/// The layout word a menu layout writes.
+fn menu_value(layout: MenuLayout) -> &'static str {
+    match layout {
+        MenuLayout::Columns => "columns",
+        MenuLayout::Grid => "grid",
+        MenuLayout::Tiles => "tiles",
+    }
+}
+
+/// The name of a scheme or style, translated.
+fn preset_name(name: &str) -> &'static str {
+    match name {
+        "Dark" => tr("Dark"),
+        "Light" => tr("Light"),
+        "Linux" => tr("Linux"),
+        "Fruit" => tr("Fruit"),
+        _ => tr("Redmond"),
+    }
+}
+
+/// The surface word a style writes.
+fn surface_value(surface: Surface) -> &'static str {
+    match surface {
+        Surface::Flat => "flat",
+        Surface::Gradient => "gradient",
+        Surface::Glossy => "glossy",
+    }
+}
+
+/// The glyphs word a style writes.
+fn glyphs_value(glyphs: Glyphs) -> &'static str {
+    match glyphs {
+        Glyphs::Lines => "lines",
+        Glyphs::Circles => "circles",
+        Glyphs::Wide => "wide",
     }
 }
 
@@ -815,24 +1080,34 @@ impl Groups<'_> {
         }
     }
 
-    /// Adds a row of preset swatches and a hex field for a color key.
+    /// Adds a row of preset swatches and the swatch of the current color,
+    /// which opens the picker, for a color key.
+    ///
+    /// # Arguments
+    /// * `title` - The row's name.
+    /// * `field` - The color field.
+    /// * `key` - The config key.
+    /// * `current` - The color set.
+    /// * `open` - Whether the field's picker is open.
+    /// * `presets` - The preset colors as `#rrggbb`.
     fn color(
         &mut self,
         title: &str,
         field: Field,
         key: &'static str,
-        current: String,
-        focused: bool,
+        current: Color,
+        open: bool,
         presets: &[&str],
     ) {
         let mut widths: Vec<i32> = presets.iter().map(|_| SWATCH).collect();
-        widths.push(COLOR_FIELD_WIDTH);
+        widths.push(PICKER_BUTTON);
         let (_, lines) = flow(0, self.area_width(), &widths);
         let area = self.row(title, lines);
         let (at, _) = flow(area.x, area.w, &widths);
+        let current_hex = hex(current);
         for (swatch, at) in presets.iter().zip(&at) {
             let rect = placed(area, *at, SWATCH, SWATCH);
-            let active = !focused && current.eq_ignore_ascii_case(swatch);
+            let active = current_hex.eq_ignore_ascii_case(swatch);
             let color = parse_color(swatch);
             self.push(
                 Kind::Swatch,
@@ -843,8 +1118,9 @@ impl Groups<'_> {
             )
             .color = color;
         }
-        let rect = placed(area, at[presets.len()], COLOR_FIELD_WIDTH, CONTROL);
-        self.push(Kind::Text, rect, Action::Focus(field), &current, focused);
+        let rect = placed(area, at[presets.len()], PICKER_BUTTON, SWATCH);
+        self.push(Kind::Picker, rect, Action::OpenPicker(field), "", open)
+            .color = Some(current);
     }
 
     /// Adds a row of application chips for a list setting, with a button
@@ -872,6 +1148,23 @@ impl Groups<'_> {
         self.push(Kind::Button, rect, Action::Pick(key), "+", false);
     }
 
+    /// Adds a row holding the theme preview, as tall as it needs.
+    fn preview(&mut self) {
+        if self.card_top.is_none() {
+            self.card_top = Some(self.y);
+            self.rows = 0;
+        }
+        self.rows += 1;
+        let height = preview::HEIGHT + 2 * PREVIEW_PAD;
+        self.out.previews.push(Rect::new(
+            self.x + CARD_PAD,
+            self.y,
+            self.width - 2 * CARD_PAD,
+            height,
+        ));
+        self.y += height;
+    }
+
     /// Adds a row with one flat button at its right.
     fn button(&mut self, title: &str, label: &str, action: Action) {
         let area = self.row(title, 1);
@@ -889,6 +1182,16 @@ fn view(d: &Desktop) -> View {
 /// Lays out the window as it is.
 fn layout(d: &Desktop) -> Layout {
     build(d, frame(d), d.settings.scroll, view(d))
+}
+
+/// The scrollbar of the page area, when the page or the application list
+/// is taller than it.
+fn scrollbar(d: &Desktop) -> Option<ui::Scrollbar> {
+    let frame = frame(d);
+    let content = build(d, frame, 0.0, view(d)).content;
+    let page = page_rect_in(frame);
+    let gutter = Rect::new(page.x, page.y, page.w + ui::SCROLLBAR, page.h);
+    ui::Scrollbar::new(gutter, content, d.settings.scroll)
 }
 
 /// Lays the window out inside a frame.
@@ -997,6 +1300,7 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
     };
     let set = |key: &'static str, value: &str| Action::Set(vec![(key, value.to_string())]);
     let focus = d.settings.focus;
+    let picking_color = d.settings.picker.map(|picker| picker.field);
     let View::Page(shown) = view else {
         return out;
     };
@@ -1028,6 +1332,31 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     (tr("Default"), set("start_icon", "")),
                 ],
             );
+            groups.field(
+                tr("Label"),
+                Field::StartLabel,
+                field_text(d, Field::StartLabel),
+                focus == Some(Field::StartLabel),
+                &[],
+            );
+            groups.segments(
+                tr("Layout"),
+                &[
+                    (tr("Left").to_string(), set("panel_layout", "left")),
+                    (tr("Centered").to_string(), set("panel_layout", "centered")),
+                ],
+                if d.config.panel_centered {
+                    tr("Centered")
+                } else {
+                    tr("Left")
+                },
+            );
+            groups.slider(
+                tr("Margin"),
+                "panel_margin",
+                slider_value(d, "panel_margin"),
+                "px",
+            );
             groups.group(tr("Items"));
             groups.switch(tr("Clock"), "show_clock", d.config.show_clock);
             groups.field(
@@ -1044,6 +1373,19 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
             let launchers = d.config.launchers.clone();
             groups.chips(tr("Applications"), "launchers", &launchers, d);
             groups.group(tr("Start menu"));
+            groups.segments(
+                tr("Layout"),
+                &[
+                    (tr("Columns").to_string(), set("menu_layout", "columns")),
+                    (tr("Grid").to_string(), set("menu_layout", "grid")),
+                    (tr("Tiles").to_string(), set("menu_layout", "tiles")),
+                ],
+                match d.config.menu_layout {
+                    MenuLayout::Columns => tr("Columns"),
+                    MenuLayout::Grid => tr("Grid"),
+                    MenuLayout::Tiles => tr("Tiles"),
+                },
+            );
             let favorites = d.config.favorites.clone();
             groups.chips(tr("Favorites"), "favorites", &favorites, d);
             groups.switch(tr("Recent"), "track_recent", d.config.track_recent);
@@ -1111,8 +1453,8 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                 tr("Color"),
                 Field::Color,
                 wallpaper_key(d, "background"),
-                field_text(d, Field::Color),
-                focus == Some(Field::Color),
+                field_color(d, Field::Color),
+                picking_color == Some(Field::Color),
                 &SWATCHES,
             );
             groups.field(
@@ -1150,6 +1492,36 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     .collect();
                 groups.button("", tr("Use shared"), Action::Set(clear));
             }
+        }
+        Page::Theme => {
+            groups.group(tr("Preview"));
+            groups.preview();
+            groups.group(tr("Theme"));
+            let schemes: Vec<(String, Action)> = SCHEMES
+                .iter()
+                .map(|(name, colors)| {
+                    let changes = COLOR_KEYS
+                        .iter()
+                        .zip(colors)
+                        .map(|(key, color)| (*key, color.to_string()))
+                        .collect();
+                    (preset_name(name).to_string(), Action::Set(changes))
+                })
+                .collect();
+            groups.segments(
+                tr("Scheme"),
+                &schemes,
+                current_scheme(d.config.theme).map_or("", preset_name),
+            );
+            let styles: Vec<(String, Action)> = STYLES
+                .iter()
+                .map(|style| (preset_name(style.name).to_string(), Action::Set(style.changes())))
+                .collect();
+            groups.segments(
+                tr("Style"),
+                &styles,
+                current_style(&d.config).map_or("", preset_name),
+            );
             groups.group(tr("Colors"));
             for color in ThemeColor::ALL {
                 let field = Field::Theme(color);
@@ -1157,16 +1529,129 @@ fn build(d: &Desktop, frame: Rect, scroll: f64, view: View) -> Layout {
                     color.name(),
                     field,
                     color.key(),
-                    field_text(d, field),
-                    focus == Some(field),
+                    field_color(d, field),
+                    picking_color == Some(field),
                     color.presets(),
                 );
             }
+            groups.group(tr("Windows"));
+            let window = d.config.window;
+            groups.switch(tr("Decorate windows"), "theme_windows", window.decorate);
+            groups.segments(
+                tr("Surface"),
+                &[
+                    (tr("Flat").to_string(), set("window_surface", "flat")),
+                    (tr("Gradient").to_string(), set("window_surface", "gradient")),
+                    (tr("Glossy").to_string(), set("window_surface", "glossy")),
+                ],
+                match window.surface {
+                    Surface::Flat => tr("Flat"),
+                    Surface::Gradient => tr("Gradient"),
+                    Surface::Glossy => tr("Glossy"),
+                },
+            );
+            groups.segments(
+                tr("Buttons"),
+                &[
+                    (tr("Right").to_string(), set("window_buttons", "right")),
+                    (tr("Left").to_string(), set("window_buttons", "left")),
+                ],
+                match window.buttons {
+                    ButtonSide::Right => tr("Right"),
+                    ButtonSide::Left => tr("Left"),
+                },
+            );
+            groups.segments(
+                tr("Glyphs"),
+                &[
+                    (tr("Lines").to_string(), set("window_glyphs", "lines")),
+                    (tr("Circles").to_string(), set("window_glyphs", "circles")),
+                    (tr("Wide").to_string(), set("window_glyphs", "wide")),
+                ],
+                match window.glyphs {
+                    Glyphs::Lines => tr("Lines"),
+                    Glyphs::Circles => tr("Circles"),
+                    Glyphs::Wide => tr("Wide"),
+                },
+            );
+            groups.slider(
+                tr("Corners"),
+                "window_corners",
+                slider_value(d, "window_corners"),
+                "px",
+            );
         }
     }
     groups.finish();
     out.content = groups.y + scroll as i32 - page.y;
+    if let Some(picker) = d.settings.picker {
+        lay_out_picker(d, &mut out, frame, page, picker);
+    }
     out
+}
+
+/// Lays the color picker over the page: below the swatch that opened it when
+/// the window has room there, above it otherwise, and not at all while that
+/// swatch is scrolled out of view.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `out` - The layout so far, with the page's controls.
+/// * `frame` - The window rectangle.
+/// * `page` - The page area.
+/// * `picker` - The open picker.
+fn lay_out_picker(d: &Desktop, out: &mut Layout, frame: Rect, page: Rect, picker: Picker) {
+    let Some(anchor) = out
+        .controls
+        .iter()
+        .find(|c| c.action == Action::OpenPicker(picker.field))
+        .map(|c| c.rect)
+    else {
+        return;
+    };
+    if anchor.bottom() <= page.y || anchor.y >= page.bottom() {
+        return;
+    }
+    let left = frame.x + PAD;
+    let x = (anchor.right() - PICKER_WIDTH).clamp(left, (frame.right() - PAD - PICKER_WIDTH).max(left));
+    let y = if anchor.bottom() + GAP + PICKER_HEIGHT <= frame.bottom() - PAD {
+        anchor.bottom() + GAP
+    } else {
+        (anchor.y - GAP - PICKER_HEIGHT).max(frame.y + PAD)
+    };
+    let popup = Rect::new(x, y, PICKER_WIDTH, PICKER_HEIGHT);
+    let inner_w = PICKER_WIDTH - 2 * PICKER_PAD;
+    let area = Rect::new(popup.x + PICKER_PAD, popup.y + PICKER_PAD, inner_w, PICKER_AREA);
+    let hue = Rect::new(area.x, area.bottom() + PICKER_PAD, inner_w, PICKER_HUE);
+    let field = Rect::new(area.x, hue.bottom() + PICKER_PAD, PICKER_FIELD_WIDTH, CONTROL);
+    let first = out.controls.len();
+    let control = |rect, action, label: String, active, kind| Control {
+        rect,
+        action,
+        label,
+        active,
+        kind,
+        color: None,
+        app: None,
+        clip: None,
+    };
+    out.controls
+        .push(control(area, Action::Area, String::new(), false, Kind::ColorArea));
+    out.controls
+        .push(control(hue, Action::Hue, String::new(), false, Kind::HueStrip));
+    out.controls.push(control(
+        field,
+        Action::Focus(picker.field),
+        field_text(d, picker.field),
+        d.settings.focus == Some(picker.field),
+        Kind::Text,
+    ));
+    out.picker = Some(PickerLayout {
+        frame: popup,
+        area,
+        hue,
+        first,
+    });
 }
 
 /// The value a slider shows: the one being dragged, else the setting.
@@ -1179,6 +1664,8 @@ fn slider_value(d: &Desktop, key: &str) -> i32 {
     match key {
         "panel_height" => d.config.panel_height,
         "panel_width" => d.config.panel_width,
+        "panel_margin" => d.config.panel_margin,
+        "window_corners" => d.config.window.corners,
         _ => d.config.panel_opacity,
     }
 }
@@ -1292,6 +1779,58 @@ fn draw_field(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hover
             ui::text(),
         );
     }
+}
+
+/// The eyedropper glyph centered in a rectangle, as the shapes to fill and
+/// the lines to stroke with their widths: a tube tapering to its tip at the
+/// lower left, the collar across it, the bulb beyond, and a drop below the
+/// tip.
+fn dropper_glyph(rect: Rect) -> (Vec<tiny_skia::Path>, Vec<(tiny_skia::Path, f32)>) {
+    let scale = 1.05;
+    let cx = rect.x as f32 + rect.w as f32 / 2.0 + 0.5 * scale;
+    let cy = rect.y as f32 + rect.h as f32 / 2.0 - 1.8 * scale;
+    let axis = std::f32::consts::FRAC_1_SQRT_2 * scale;
+    let at = |u: f32, v: f32| (cx + (u + v) * axis, cy + (v - u) * axis);
+    let polygon = |points: &[(f32, f32)]| {
+        let mut pb = PathBuilder::new();
+        for (i, (u, v)) in points.iter().enumerate() {
+            let (x, y) = at(*u, *v);
+            if i == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        pb.close();
+        pb.finish()
+    };
+    let line = |u1: f32, v1: f32, u2: f32, v2: f32| {
+        let mut pb = PathBuilder::new();
+        let (x, y) = at(u1, v1);
+        pb.move_to(x, y);
+        let (x, y) = at(u2, v2);
+        pb.line_to(x, y);
+        pb.finish()
+    };
+    let tube = polygon(&[
+        (-7.5, -0.4),
+        (-7.5, 0.4),
+        (-5.0, 1.5),
+        (1.5, 1.5),
+        (1.5, -1.5),
+        (-5.0, -1.5),
+    ]);
+    let (tip_x, tip_y) = at(-7.5, 0.0);
+    let drop = PathBuilder::from_circle(tip_x - 0.3 * scale, tip_y + 3.2 * scale, 1.3 * scale);
+    let fills = [tube, drop].into_iter().flatten().collect();
+    let strokes = [
+        (line(2.6, -3.4, 2.6, 3.4), 2.4 * scale),
+        (line(4.0, 0.0, 6.6, 0.0), 3.6 * scale),
+    ]
+    .into_iter()
+    .filter_map(|(path, width)| path.map(|p| (p, width)))
+    .collect();
+    (fills, strokes)
 }
 
 /// Draws a toggle switch row: the pill at the row's right.
@@ -1430,9 +1969,9 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
                 canvas.draw_image_fit(&icon, icon_rect);
             }
             if hovered {
-                canvas.fill_rounded(rect, 6.0, Color::from_rgba8(0, 0, 0, 0x90));
+                canvas.fill_rounded(rect, 6.0, ui::text_alpha(0xa0));
                 if let Some(path) = cross_path(rect, 5.0) {
-                    canvas.stroke_path(&path, 2.0, ui::text());
+                    canvas.stroke_path(&path, 2.0, ui::popup_bg());
                 }
             }
         }
@@ -1460,6 +1999,50 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
             }
         }
         Kind::Slider => draw_slider(d, canvas, control, hovered),
+        Kind::Picker => {
+            let color = control.color.unwrap_or(Color::BLACK);
+            canvas.fill_rounded(rect, 5.0, color);
+            let ink = if ui::luminance(color) > 0.5 {
+                Color::from_rgba8(0, 0, 0, 0xd0)
+            } else {
+                Color::from_rgba8(0xff, 0xff, 0xff, 0xe0)
+            };
+            let (fills, strokes) = dropper_glyph(rect);
+            for path in &fills {
+                canvas.fill_path(path, ink);
+            }
+            for (path, width) in &strokes {
+                canvas.stroke_path(path, *width, ink);
+            }
+            let border = if control.active {
+                ui::accent()
+            } else if hovered {
+                ui::text()
+            } else {
+                ui::popup_border()
+            };
+            canvas.stroke_rounded(rect, 5.0, if control.active { 2.0 } else { 1.0 }, border);
+        }
+        Kind::ColorArea => {
+            let (h, s, v) = d.settings.picker.map_or((0.0, 0.0, 0.0), |picker| picker.hsv);
+            canvas.fill_rounded_shaded(rect, 5.0, |u, w| hsv_to_color(h, u, 1.0 - w));
+            canvas.stroke_rounded(rect, 5.0, 1.0, ui::popup_border());
+            let cx = rect.x as f32 + s * rect.w as f32;
+            let cy = rect.y as f32 + (1.0 - v) * rect.h as f32;
+            if let Some(ring) = PathBuilder::from_circle(cx, cy, PICKER_MARK) {
+                canvas.stroke_path(&ring, 3.0, Color::from_rgba8(0, 0, 0, 0x80));
+                canvas.stroke_path(&ring, 1.5, Color::WHITE);
+            }
+        }
+        Kind::HueStrip => {
+            let h = d.settings.picker.map_or(0.0, |picker| picker.hsv.0);
+            canvas.fill_rounded_shaded(rect, 5.0, |u, _| hsv_to_color(u * 360.0, 1.0, 1.0));
+            canvas.stroke_rounded(rect, 5.0, 1.0, ui::popup_border());
+            let x = rect.x + (h / 360.0 * rect.w as f32).round() as i32;
+            let knob = Rect::new(x - 3, rect.y - 2, 6, rect.h + 4);
+            canvas.fill_rounded(knob, 3.0, Color::WHITE);
+            canvas.stroke_rounded(knob, 3.0, 1.0, Color::from_rgba8(0, 0, 0, 0x80));
+        }
         Kind::Segment => {
             if control.active {
                 canvas.fill_rounded(rect, 7.0, ui::accent());
@@ -1491,6 +2074,7 @@ fn draw_control(d: &mut Desktop, canvas: &mut Canvas<'_>, control: &Control, hov
 /// * `d` - The desktop.
 /// * `canvas` - The panel canvas.
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
+    sync_picker(d);
     let frame = frame(d);
     let page = page_rect_in(frame);
     ui::draw_popup_frame(canvas, frame);
@@ -1506,7 +2090,8 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     );
     canvas.fill_rect(Rect::new(page.x - PAD / 2, page.y, 1, page.h), ui::separator());
     let layout = layout(d);
-    for (index, control) in layout.controls.iter().enumerate() {
+    let first = layout.picker.map_or(layout.controls.len(), |picker| picker.first);
+    for (index, control) in layout.controls.iter().enumerate().take(first) {
         if control.clip.is_none() {
             draw_control(d, canvas, control, d.hover == Hover::Control(index));
         }
@@ -1517,6 +2102,11 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
     }
     for line in &layout.lines {
         canvas.fill_rect(*line, ui::separator());
+    }
+    for area in &layout.previews {
+        if area.bottom() > page.y && area.y < page.bottom() {
+            preview::draw(d, canvas, *area, page);
+        }
     }
     for text in &layout.texts {
         ui::label(
@@ -1530,7 +2120,7 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
             if text.caption { ui::text_dim() } else { ui::text() },
         );
     }
-    for (index, control) in layout.controls.iter().enumerate() {
+    for (index, control) in layout.controls.iter().enumerate().take(first) {
         if let Some(clip) = control.clip {
             if clip != page {
                 canvas.clip(clip);
@@ -1542,7 +2132,30 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) -> Rect {
         }
     }
     canvas.reset_clip();
+    if let Some(bar) = scrollbar(d) {
+        bar.draw(canvas, d.settings.bar_drag.is_some());
+    }
+    if let Some(picker) = layout.picker {
+        ui::draw_popup_frame(canvas, picker.frame);
+        for (index, control) in layout.controls.iter().enumerate().skip(first) {
+            draw_control(d, canvas, control, d.hover == Hover::Control(index));
+        }
+    }
     frame
+}
+
+/// Takes the picker's hue, saturation and value from its setting when that
+/// changed under it: a preset clicked, a value typed or the file edited.
+fn sync_picker(d: &mut Desktop) {
+    let Some(mut picker) = d.settings.picker else {
+        return;
+    };
+    let current = field_color(d, picker.field);
+    let (h, s, v) = picker.hsv;
+    if hex(current) != hex(hsv_to_color(h, s, v)) {
+        picker.hsv = color_to_hsv(current);
+        d.settings.picker = Some(picker);
+    }
 }
 
 /// The control under a point, or `None` outside the window.
@@ -1556,7 +2169,21 @@ pub fn hit(d: &Desktop, x: f64, y: f64) -> Option<Hover> {
     if !frame.contains(x, y) {
         return None;
     }
-    for (index, control) in layout(d).controls.iter().enumerate() {
+    let layout = layout(d);
+    if let Some(picker) = layout.picker {
+        for (index, control) in layout.controls.iter().enumerate().skip(picker.first) {
+            if control.rect.contains(x, y) {
+                return Some(Hover::Control(index));
+            }
+        }
+        if picker.frame.contains(x, y) {
+            return Some(Hover::None);
+        }
+    }
+    if scrollbar(d).is_some_and(|bar| bar.track.contains(x, y)) {
+        return Some(Hover::None);
+    }
+    for (index, control) in layout.controls.iter().enumerate() {
         if control.clip.is_some_and(|clip| !clip.contains(x, y)) {
             continue;
         }
@@ -1581,18 +2208,32 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
     if button != Button::Left {
         return true;
     }
+    let layout = layout(d);
+    // A click anywhere but in the open picker closes it, then goes on to
+    // whatever it landed on.
+    let open = d.settings.picker.map(|picker| picker.field);
+    if open.is_some() && !layout.picker.is_some_and(|picker| picker.frame.contains(x, y)) {
+        d.settings.picker = None;
+    }
     let Hover::Control(index) = hover else {
         commit_field(d);
+        if let Some(bar) = scrollbar(d)
+            && bar.track.contains(x, y)
+        {
+            let grab = bar.grab(y);
+            d.settings.scroll = bar.scroll_at(y, grab);
+            d.settings.bar_drag = Some(grab);
+        }
         d.redraw_panel();
         return true;
     };
-    let layout = layout(d);
     let Some(control) = layout.controls.get(index) else {
         return true;
     };
     let action = control.action.clone();
     if !matches!(action, Action::Focus(_)) {
         commit_field(d);
+        sync_picker(d);
     }
     match action {
         Action::Set(changes) => d.write_config(&changes),
@@ -1643,18 +2284,137 @@ pub fn click(d: &mut Desktop, x: f64, y: f64, button: Button) -> bool {
             d.close_popup();
             return true;
         }
+        Action::OpenPicker(field) => {
+            if open != Some(field) {
+                let hsv = color_to_hsv(field_color(d, field));
+                d.settings.picker = Some(Picker {
+                    field,
+                    hsv,
+                    drag: None,
+                });
+            }
+        }
+        Action::Hue => pick_hue(d, control.rect, x, true),
+        Action::Area => pick_area(d, control.rect, x, y, true),
     }
     d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
     d.redraw_panel();
     true
 }
 
-/// Follows a slider drag, applying the value on screen.
+/// Sets the picker's hue from a pointer X over the hue strip.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `rect` - The hue strip.
+/// * `x` - Pointer X.
+/// * `start` - Whether this press starts a drag.
+fn pick_hue(d: &mut Desktop, rect: Rect, x: f64, start: bool) {
+    let Some(mut picker) = d.settings.picker else {
+        return;
+    };
+    let ratio = ((x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0) as f32;
+    picker.hsv.0 = ratio * 360.0;
+    if start {
+        picker.drag = Some(PickerPart::Hue);
+    }
+    apply_picker(d, picker);
+}
+
+/// Sets the picker's saturation and value from a pointer over the square.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `rect` - The square.
+/// * `x` - Pointer X.
+/// * `y` - Pointer Y.
+/// * `start` - Whether this press starts a drag.
+fn pick_area(d: &mut Desktop, rect: Rect, x: f64, y: f64, start: bool) {
+    let Some(mut picker) = d.settings.picker else {
+        return;
+    };
+    picker.hsv.1 = ((x - rect.x as f64) / rect.w.max(1) as f64).clamp(0.0, 1.0) as f32;
+    picker.hsv.2 = 1.0 - ((y - rect.y as f64) / rect.h.max(1) as f64).clamp(0.0, 1.0) as f32;
+    if start {
+        picker.drag = Some(PickerPart::Area);
+    }
+    apply_picker(d, picker);
+}
+
+/// Keeps a picker state and shows its color on screen without writing it.
+fn apply_picker(d: &mut Desktop, picker: Picker) {
+    d.settings.picker = Some(picker);
+    let (h, s, v) = picker.hsv;
+    preview_color(d, picker.field, hsv_to_color(h, s, v));
+    d.redraw_panel();
+}
+
+/// Applies a color on screen without writing it: an interface color to the
+/// theme the bar and this window draw with, the background to the monitor
+/// shown.  The file written when the drag ends brings the rest along.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `field` - The color field.
+/// * `color` - The color.
+fn preview_color(d: &mut Desktop, field: Field, color: Color) {
+    match field {
+        Field::Theme(which) => {
+            match which {
+                ThemeColor::Accent => d.config.theme.accent = color,
+                ThemeColor::Panel => d.config.theme.panel = color,
+                ThemeColor::Popup => d.config.theme.popup = color,
+                ThemeColor::Text => d.config.theme.text = color,
+            }
+            ui::set_theme(d.config.theme);
+        }
+        Field::Color => {
+            match d.settings.monitor {
+                None => d.config.wallpaper.color = color,
+                Some(n) => d.config.monitors.entry(n).or_default().color = Some(color),
+            }
+            d.repaint_wallpapers();
+        }
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => {}
+    }
+}
+
+/// The config key a color field writes.
+fn color_key(d: &Desktop, field: Field) -> Option<&'static str> {
+    match field {
+        Field::Color => Some(wallpaper_key(d, "background")),
+        Field::Theme(color) => Some(color.key()),
+        Field::ClockFormat | Field::StartIcon | Field::StartLabel | Field::Image => None,
+    }
+}
+
+/// Follows a drag of a slider or of a part of the color picker, applying the
+/// value on screen.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 /// * `x` - Pointer X.
-pub fn drag(d: &mut Desktop, x: f64) {
+/// * `y` - Pointer Y.
+pub fn drag(d: &mut Desktop, x: f64, y: f64) {
+    if let Some(grab) = d.settings.bar_drag {
+        if let Some(bar) = scrollbar(d) {
+            d.settings.scroll = bar.scroll_at(y, grab);
+        }
+        d.redraw_panel();
+        return;
+    }
+    if let Some(picker) = d.settings.picker
+        && let Some(part) = picker.drag
+    {
+        let Some(rects) = layout(d).picker else {
+            return;
+        };
+        match part {
+            PickerPart::Hue => pick_hue(d, rects.hue, x, false),
+            PickerPart::Area => pick_area(d, rects.area, x, y, false),
+        }
+        return;
+    }
     let Some((key, current)) = d.settings.drag else {
         return;
     };
@@ -1669,11 +2429,25 @@ pub fn drag(d: &mut Desktop, x: f64) {
     d.redraw_panel();
 }
 
-/// Ends a slider drag, writing the value.
+/// Ends a drag of a slider or of the color picker, writing the value.
 ///
 /// # Arguments
 /// * `d` - The desktop.
 pub fn release(d: &mut Desktop) {
+    if d.settings.bar_drag.take().is_some() {
+        let (x, y) = d.pointer;
+        d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
+        d.redraw_panel();
+    }
+    if let Some(mut picker) = d.settings.picker
+        && picker.drag.take().is_some()
+    {
+        d.settings.picker = Some(picker);
+        if let Some(key) = color_key(d, picker.field) {
+            let (h, s, v) = picker.hsv;
+            d.write_config(&[(key, hex(hsv_to_color(h, s, v)))]);
+        }
+    }
     if let Some((key, value)) = d.settings.drag.take() {
         d.cancel_preview();
         d.write_config(&[(key, value.to_string())]);
@@ -1706,8 +2480,30 @@ fn commit_field(d: &mut Desktop) {
         }
         Field::ClockFormat => ("clock_format", text),
         Field::StartIcon => ("start_icon", text.trim().to_string()),
+        Field::StartLabel => ("start_label", text.trim().to_string()),
     };
     d.write_config(&[(key, value)]);
+    sync_picker(d);
+}
+
+/// Handles Escape: drops the focus of a field being typed into, keeping the
+/// setting as it was, else closes the color picker.
+///
+/// # Arguments
+/// * `d` - The desktop.
+///
+/// # Returns
+/// Whether either was open, so the key is used up.
+pub fn escape(d: &mut Desktop) -> bool {
+    if d.settings.focus.take().is_some() {
+        d.settings.editing.clear();
+    } else if d.settings.picker.take().is_none() {
+        return false;
+    }
+    let (x, y) = d.pointer;
+    d.set_hover(hit(d, x, y).unwrap_or(Hover::None));
+    d.redraw_panel();
+    true
 }
 
 /// Handles wheel scrolling over the page or the application list; returns

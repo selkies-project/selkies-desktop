@@ -1,5 +1,8 @@
 //! The bar: start button, quick launch buttons, taskbar, system tray slot,
-//! volume, clock and the show desktop button.
+//! volume, clock and the show desktop button.  The start button, quick
+//! launch and taskbar sit at the left, or in the middle of the bar when
+//! the layout is centered; the tray, volume, clock and show desktop button
+//! stay at the right.
 
 use crate::desktop::{Desktop, Hover, Popup};
 use crate::event::{Button, WindowAction};
@@ -15,8 +18,31 @@ const TASK_MAX_WIDTH: i32 = 200;
 const TASK_MIN_WIDTH: i32 = 40;
 /// Width of the volume button.
 const VOLUME_WIDTH: i32 = 32;
-/// Width of the show desktop button.
-const SHOW_DESKTOP_WIDTH: i32 = 22;
+/// Width of the window outline on the show desktop button for a button
+/// height: two fifths of it, within the range that reads well.
+fn show_desktop_glyph_width(height: i32) -> i32 {
+    (height * 2 / 5).clamp(14, 20)
+}
+
+/// Side of the start button's icon for a button height.
+fn start_icon_size(height: i32) -> i32 {
+    (height * 22 / 26).clamp(16, 48)
+}
+
+/// Space between the start button's icon and its label.
+const LABEL_GAP: i32 = 6;
+
+/// Width of the start button: room for its icon, and for its label when it
+/// has one.
+fn start_width(d: &mut Desktop, height: i32) -> i32 {
+    let base = ui::START_WIDTH.max(start_icon_size(height) + 10);
+    match d.config.start_label.clone() {
+        Some(label) => {
+            base + LABEL_GAP + ui::text_width(&mut d.fonts, &label, ui::FONT_SIZE, true, d.panel.scale)
+        }
+        None => base,
+    }
+}
 
 /// Where everything on the bar is.
 pub struct Layout {
@@ -62,19 +88,19 @@ impl Layout {
 /// * `d` - The desktop.
 pub fn layout(d: &mut Desktop) -> Layout {
     let bar = d.bar_rect();
-    let start = Rect::new(bar.x + GAP, bar.y + 3, ui::START_WIDTH, bar.h - 6);
-    let mut launchers = Vec::new();
-    let mut x = start.right() + GAP;
-    for id in &d.config.launchers {
-        if let Some(index) = d.apps.find(id) {
-            launchers.push((index, Rect::new(x, bar.y + 3, bar.h - 6, bar.h - 6)));
-            x += bar.h - 6 + GAP;
-        }
-    }
+    let start_width = start_width(d, bar.h - 6);
+    let launcher_ids: Vec<usize> = d
+        .config
+        .launchers
+        .iter()
+        .filter_map(|id| d.apps.find(id))
+        .collect();
+    let launchers_width = launcher_ids.len() as i32 * (bar.h - 6 + GAP);
     let mut right = bar.right() - GAP;
     let show_desktop = if d.config.show_desktop_button {
-        right -= SHOW_DESKTOP_WIDTH;
-        let r = Rect::new(right, bar.y + 3, SHOW_DESKTOP_WIDTH, bar.h - 6);
+        let width = show_desktop_glyph_width(bar.h - 6) + 8;
+        right -= width;
+        let r = Rect::new(right, bar.y + 3, width, bar.h - 6);
         right -= GAP;
         Some(r)
     } else {
@@ -107,20 +133,37 @@ pub fn layout(d: &mut Desktop) -> Layout {
     } else {
         None
     };
-    let tasks_x = x + GAP;
-    let available = (right - GAP - tasks_x).max(0);
+    let left_edge = bar.x + GAP;
+    let available = (right - GAP - (left_edge + start_width + GAP + launchers_width + GAP)).max(0);
     let count = d.toplevels.len() as i32;
+    let task_width = if count > 0 {
+        ((available - (count - 1) * GAP) / count).clamp(TASK_MIN_WIDTH, TASK_MAX_WIDTH)
+    } else {
+        0
+    };
+    let shown = if count > 0 {
+        (((available + GAP) / (task_width + GAP)).max(0) as usize).min(d.toplevels.len())
+    } else {
+        0
+    };
+    let group_width = start_width + GAP + launchers_width + GAP + shown as i32 * (task_width + GAP);
+    let x0 = if d.config.panel_centered {
+        (bar.x + (bar.w - group_width) / 2).clamp(left_edge, (right - GAP - group_width).max(left_edge))
+    } else {
+        left_edge
+    };
+    let start = Rect::new(x0, bar.y + 3, start_width, bar.h - 6);
+    let mut launchers = Vec::new();
+    let mut x = start.right() + GAP;
+    for index in launcher_ids {
+        launchers.push((index, Rect::new(x, bar.y + 3, bar.h - 6, bar.h - 6)));
+        x += bar.h - 6 + GAP;
+    }
     let mut tasks = Vec::new();
-    if count > 0 {
-        let width = ((available - (count - 1) * GAP) / count).clamp(TASK_MIN_WIDTH, TASK_MAX_WIDTH);
-        let mut x = tasks_x;
-        for index in 0..d.toplevels.len() {
-            if x + width > right {
-                break;
-            }
-            tasks.push((index, Rect::new(x, bar.y + 3, width, bar.h - 6)));
-            x += width + GAP;
-        }
+    x += GAP;
+    for index in 0..shown {
+        tasks.push((index, Rect::new(x, bar.y + 3, task_width, bar.h - 6)));
+        x += task_width + GAP;
     }
     if d.tray_slot != tray {
         d.tray_slot = tray;
@@ -278,8 +321,13 @@ fn cycle_windows(d: &mut Desktop, forward: bool) {
 pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     let layout = layout(d);
     let bg = ui::panel_bg(d.config.panel_opacity);
-    if layout.bar.w < d.panel.width {
-        let overflow = ui::PANEL_RADIUS as i32;
+    if d.config.panel_margin > 0 {
+        let radius = ui::panel_radius();
+        ui::fill_surface(canvas, layout.bar, radius, bg);
+        canvas.stroke_rounded(layout.bar, radius, 1.0, ui::separator());
+    } else if layout.bar.w < d.panel.width {
+        let radius = ui::panel_radius();
+        let overflow = radius as i32;
         let shape = if d.panel_top() {
             Rect::new(
                 layout.bar.x,
@@ -290,10 +338,10 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
         } else {
             Rect::new(layout.bar.x, layout.bar.y, layout.bar.w, layout.bar.h + overflow)
         };
-        canvas.fill_rounded(shape, ui::PANEL_RADIUS, bg);
-        canvas.stroke_rounded(shape, ui::PANEL_RADIUS, 1.0, ui::separator());
+        ui::fill_surface(canvas, shape, radius, bg);
+        canvas.stroke_rounded(shape, radius, 1.0, ui::separator());
     } else {
-        canvas.fill_rect(layout.bar, bg);
+        ui::fill_surface(canvas, layout.bar, 0.0, bg);
         canvas.fill_rect(
             Rect::new(layout.bar.x, layout.bar.y, layout.bar.w, 1),
             ui::separator(),
@@ -310,11 +358,13 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
     if let Some(bg) = start_bg {
         canvas.fill_rounded(layout.start, 5.0, bg);
     }
-    let size = (layout.start.h * 22 / 26).clamp(16, 48);
+    let size = start_icon_size(layout.start.h);
+    let icon_width = ui::START_WIDTH.max(size + 10);
+    let icon_slot = Rect::new(layout.start.x, layout.start.y, icon_width, layout.start.h);
     if let Some(icon) = d.start_icon(size) {
         let icon_rect = Rect::new(
-            layout.start.x + (layout.start.w - size) / 2,
-            layout.start.y + (layout.start.h - size) / 2,
+            icon_slot.x + (icon_slot.w - size) / 2,
+            icon_slot.y + (icon_slot.h - size) / 2,
             size,
             size,
         );
@@ -324,10 +374,28 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
             canvas,
             &mut d.fonts,
             "⋮⋮⋮",
-            layout.start,
+            icon_slot,
             15.0,
             true,
             Align::Center,
+            ui::text(),
+        );
+    }
+    if let Some(label) = d.config.start_label.clone() {
+        let text_rect = Rect::new(
+            icon_slot.right() - 2,
+            layout.start.y,
+            layout.start.right() - icon_slot.right(),
+            layout.start.h,
+        );
+        ui::label(
+            canvas,
+            &mut d.fonts,
+            &label,
+            text_rect,
+            ui::FONT_SIZE,
+            true,
+            Align::Left,
             ui::text(),
         );
     }
@@ -461,7 +529,14 @@ pub fn draw(d: &mut Desktop, canvas: &mut Canvas<'_>) {
         if d.hover == Hover::ShowDesktop || shown {
             canvas.fill_rounded(rect, 4.0, if shown { ui::active_bg() } else { ui::hover_bg() });
         }
-        let glyph = Rect::new(rect.x + 4, rect.y + 6, rect.w - 8, rect.h - 14);
+        let glyph_w = show_desktop_glyph_width(rect.h);
+        let glyph_h = glyph_w * 5 / 7;
+        let glyph = Rect::new(
+            rect.x + (rect.w - glyph_w) / 2,
+            rect.y + (rect.h - glyph_h) / 2 - 1,
+            glyph_w,
+            glyph_h,
+        );
         canvas.stroke_rounded(glyph, 2.0, 1.3, ui::text());
         canvas.fill_rect(
             Rect::new(glyph.x + 4, glyph.bottom() + 2, glyph.w - 8, 1),

@@ -31,14 +31,35 @@ people reach for in a multi-application container:
 * **Quick launch** buttons beside the start button and a **system tray**
   beside the clock that hosts the XEmbed icons applications such as Steam
   dock, under openbox and under labwc through XWayland.
-* **Settings** from a right click on the bar, in three pages: the bar's edge,
+* **Settings** from a right click on the bar, in four pages: the bar's edge,
   auto-hide, height, width, opacity, icon, items, quick launch buttons and
-  start menu favorites; the file manager's view, sort and hidden files; and
-  the wallpaper of every monitor, shared or one by one, with the four colors
-  of the interface.  Each page has a reset,
-  and a right click on an application in the start menu pins it to the
-  favorites or the quick launch.  A right click on the desktop still opens
-  the window manager's own menu.
+  start menu favorites; the file manager's view, sort and hidden files; the
+  wallpaper of every monitor, shared or one by one; and the theme, with a
+  preview of the desktop, a dark and a light scheme, the four colors of the
+  interface, and the window frames.  Each page has a reset, and a right
+  click on an application in the start menu pins it to the favorites or the
+  quick launch.  A right click on the desktop still opens the window
+  manager's own menu.
+* **Window frames** that follow the theme: a window manager theme is
+  generated from the colors and the frame settings under `~/.themes`, where
+  labwc and openbox both look before the system themes, and the running
+  window manager is told to reload, so title bars, borders and the
+  right-click menus match the bar and the popups at once.  Three styles
+  come ready: Linux as the desktop is, Fruit with a floating dock, circle
+  buttons on the left and a grid of applications in the start menu,
+  and Redmond with square frames, wide buttons and a start menu of every
+  application beside the favorites as tiles.  The shading, the side the
+  buttons sit on, their glyphs, the corner radius, the bar's layout and
+  margin and the start menu's layout can each be set alone; the bar and the
+  popups take the same shading and corners.  The button
+  side and the corners live in the window manager's `rc.xml`, which is
+  edited in place for labwc and copied from the system file for openbox; a
+  hardened image that locks that file keeps its layout and takes the colors
+  only.  Openbox draws no rounded corners.  The labwc edit also turns the
+  image's rule that forces server-side decorations on every window into
+  the default, so browsers, Steam and other applications that negotiate
+  their own frames keep them instead of getting a second one; the image's
+  per-application rules and its `NO_DECOR` rule are left as they are.
 * **Files**, a small file manager in the start menu, opened by `xdg-open` for
   folders and by the wallpaper picker: a sidebar with the home, Desktop,
   Documents, Downloads, Pictures, Music and Videos folders that exist, icon
@@ -78,10 +99,19 @@ so an edit applies within a moment.
 | `panel_width` | `100` | Width of the bar as a percentage of the screen, centered with rounded corners when narrower |
 | `panel_opacity` | `95` | Opacity of the bar's background in percent |
 | `panel_autohide` | `false` | Hide the bar until the pointer touches the screen edge it sits on; it then reserves no space |
+| `panel_layout` | `left` | `left` keeps the start button, quick launch and taskbar at the left; `centered` puts them in the middle of the bar |
+| `panel_margin` | `0` | Space between the bar and the screen edges in pixels, 0 to 16, which floats it with every corner rounded |
+| `start_label` | | Text shown on the start button beside its icon |
+| `menu_layout` | `columns` | How the start menu lists applications: `columns` (categories and rows), `grid` (categories and a grid of icons) or `tiles` (every application in a list with the favorites as tiles beside it) |
 | `color_accent` | `#7967c5` | Color of markers, selections, switches and the chosen option |
 | `color_panel` | `#0a0e17` | Color of the bar |
 | `color_popup` | `#121826` | Color of menus, popups and windows |
 | `color_text` | `#eef2f8` | Color of text; hover, separator and field shades derive from it |
+| `theme_windows` | `true` | Generate the window manager's theme from the colors and the frame settings, and reload it; `false` removes the generated theme |
+| `window_surface` | `flat` | Shading of title bars, the bar and the popups: `flat`, `gradient` or `glossy` |
+| `window_buttons` | `right` | Side of a title bar the buttons sit on: `right` or `left` |
+| `window_glyphs` | `lines` | Shapes of the window buttons: `lines`, `circles` (colored, the Fruit style) or `wide` (wide flat buttons with the title at the left, the Redmond style) |
+| `window_corners` | `8` | Corner radius of windows and popups in pixels, 0 to 12; labwc rounds windows, openbox does not |
 | `language` | from `LC_ALL`, `LC_MESSAGES`, `LANG` | Interface language: `en`, `es`, `zh_cn`, `zh_tw`, `hi`, `pt`, `fr`, `ru`, `de`, `tr`, `it`, `nl`, `ar`, `ko`, `ja`, `vi`, `th`, `fil` or `da` |
 | `start_icon` | Selkies logo | Icon name from the theme, or the path of a PNG, JPEG or SVG, for the start button |
 | `background_style` | `solid` | `solid` or `gradient`, painted first |

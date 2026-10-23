@@ -17,6 +17,7 @@ mod render;
 mod tray;
 mod ui;
 mod watch;
+mod wmtheme;
 mod xkb;
 mod xpm;
 

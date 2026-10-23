@@ -1130,6 +1130,7 @@ impl Backend for WaylandBackend {
                 top,
                 height,
                 autohide,
+                margin: _,
             } => {
                 self.state.panel_height = *height;
                 self.state.panel_top = *top;

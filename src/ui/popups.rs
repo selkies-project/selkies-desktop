@@ -491,7 +491,7 @@ fn draw_tooltip(d: &mut Desktop, canvas: &mut Canvas<'_>, text: &str) -> Option<
     let frame = anchor_above(d, anchor, width, 26);
     canvas.fill_rounded(frame.inflate(1), 6.0, rgba(0, 0, 0, 0x60));
     canvas.fill_rounded(frame, 5.0, ui::tooltip_bg());
-    canvas.stroke_rounded(frame, 5.0, 1.0, rgba(0xff, 0xff, 0xff, 0x30));
+    canvas.stroke_rounded(frame, 5.0, 1.0, ui::popup_border());
     let text_rect = Rect::new(frame.x + 9, frame.y, frame.w - 18, frame.h);
     ui::label(
         canvas,
