@@ -174,6 +174,53 @@ mod tests {
         assert!(keys.contains(&"Settings"));
     }
 
+    /// Every `tr("…")` and `trf("…")` key in the sources, except this
+    /// module's own tests.
+    fn source_keys() -> Vec<String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("i18n.rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for call in ["tr(\"", "trf(\""] {
+                        for (at, _) in text.match_indices(call) {
+                            let before = text[..at].chars().next_back();
+                            if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                                continue;
+                            }
+                            let rest = &text[at + call.len()..];
+                            if let Some(end) = rest.find('"') {
+                                out.push(rest[..end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut keys = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut keys,
+        );
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    #[test]
+    fn every_source_key_is_translated() {
+        let keys = source_keys();
+        assert!(keys.len() > 100, "found only {} keys", keys.len());
+        let table = parse(LOCALES[0].1);
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|key| !table.contains_key(key.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "keys without a translation: {missing:?}");
+    }
+
     #[test]
     fn translates_and_fills() {
         select(Some("es"));

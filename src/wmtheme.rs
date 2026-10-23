@@ -888,6 +888,107 @@ mod tests {
     }
 
     #[test]
+    fn edits_settle_after_one_pass() {
+        let labwc = "<labwc_config>\n  <theme>\n    <name>Clearlooks</name>\n    <titlebar>\n      \
+                     <layout>icon:iconify,max,close</layout>\n    </titlebar>\n  </theme>\n  \
+                     <windowRules>\n    <windowRule identifier=\"*\" serverDecoration=\"yes\" />\n  \
+                     </windowRules>\n</labwc_config>\n";
+        let openbox = "<theme>\n  <name>Clearlooks</name>\n  <titleLayout>NLIMC</titleLayout>\n</theme>\n";
+        for style in [
+            WindowStyle::default(),
+            WindowStyle {
+                buttons: ButtonSide::Left,
+                corners: 0,
+                ..WindowStyle::default()
+            },
+            WindowStyle {
+                decorate: false,
+                ..WindowStyle::default()
+            },
+        ] {
+            let once = edited_rc(labwc, Manager::Labwc, style);
+            assert_eq!(edited_rc(&once, Manager::Labwc, style), once);
+            let once = edited_rc(openbox, Manager::Openbox, style);
+            assert_eq!(edited_rc(&once, Manager::Openbox, style), once);
+        }
+        for side in [ButtonSide::Left, ButtonSide::Right] {
+            let once = labwc_layout("icon:iconify,max,close,shade,desk", side);
+            assert_eq!(labwc_layout(&once, side), once);
+            let once = openbox_layout("NLIMCSD", side);
+            assert_eq!(openbox_layout(&once, side), once);
+        }
+        assert_eq!(
+            labwc_layout("icon:iconify,max,close,shade,desk", ButtonSide::Left),
+            "close,iconify,max,shade,desk:icon"
+        );
+    }
+
+    #[test]
+    fn theme_text_is_deterministic_and_matches_the_shading() {
+        let theme = Theme::default();
+        let glossy = WindowStyle {
+            surface: Surface::Glossy,
+            ..WindowStyle::default()
+        };
+        assert_eq!(themerc(theme, glossy), themerc(theme, glossy));
+        let text = themerc(theme, glossy);
+        let value = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key).and_then(|rest| rest.strip_prefix(": ")))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("{key} missing"))
+        };
+        let palette = Palette::new(theme);
+        assert_eq!(
+            value("window.active.title.bg.color.splitTo"),
+            hex(palette.title_shade(Surface::Glossy, true, 0.0))
+        );
+        assert_eq!(
+            value("window.active.title.bg.colorTo.splitTo"),
+            hex(palette.title_shade(Surface::Glossy, true, 1.0))
+        );
+        assert_eq!(
+            value("window.inactive.label.text.color"),
+            hex(palette.label_inactive)
+        );
+        assert_eq!(
+            value("menu.items.active.text.color"),
+            hex(palette.menu_active_text)
+        );
+        for (name, _) in bitmaps(Glyphs::Lines) {
+            assert!(name.ends_with(".xbm"));
+        }
+    }
+
+    /// Reads an X bitmap text back into its pixels.
+    fn parse_xbm(text: &str) -> Bitmap {
+        let body = text.split('{').nth(1).unwrap().split('}').next().unwrap();
+        let bytes: Vec<u8> = body
+            .split(',')
+            .map(|s| u8::from_str_radix(s.trim().trim_start_matches("0x"), 16).unwrap())
+            .collect();
+        let mut bits = [[false; GLYPH]; GLYPH];
+        let per_row = GLYPH.div_ceil(8);
+        for (y, row) in bits.iter_mut().enumerate() {
+            for (x, bit) in row.iter_mut().enumerate() {
+                *bit = bytes[y * per_row + x / 8] & (1 << (x % 8)) != 0;
+            }
+        }
+        bits
+    }
+
+    #[test]
+    fn bitmaps_survive_the_file_format() {
+        for glyphs in [Glyphs::Lines, Glyphs::Circles, Glyphs::Wide] {
+            for (name, text) in bitmaps(glyphs) {
+                let base = name.trim_end_matches(".xbm");
+                assert!(text.contains(&format!("#define {base}_width {GLYPH}")));
+                assert_eq!(parse_xbm(&text), bitmap(base, glyphs), "{name} in {glyphs:?}");
+            }
+        }
+    }
+
+    #[test]
     fn draws_button_bitmaps() {
         let files = bitmaps(Glyphs::Lines);
         assert_eq!(files.len(), 4);

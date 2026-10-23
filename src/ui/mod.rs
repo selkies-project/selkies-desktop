@@ -597,3 +597,91 @@ pub fn search_path(cx: i32, cy: i32) -> Option<Path> {
     pb.line_to(cx as f32 + 6.5, cy as f32 + 6.5);
     pb.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_tracks_the_content() {
+        let area = Rect::new(0, 0, 100, 200);
+        assert!(Scrollbar::new(area, 150, 0.0).is_none());
+        let bar = Scrollbar::new(area, 4000, 0.0).unwrap();
+        assert_eq!(bar.thumb.h, THUMB_MIN);
+        assert_eq!(bar.thumb.y, area.y + THUMB_INSET);
+        assert_eq!(bar.track.x, area.right() - SCROLLBAR);
+        let end = Scrollbar::new(area, 4000, 3800.0).unwrap();
+        assert_eq!(end.thumb.bottom(), area.bottom() - THUMB_INSET);
+        let mid = Scrollbar::new(area, 400, 100.0).unwrap();
+        let y = mid.thumb.y as f64 + 5.0;
+        let grab = mid.grab(y);
+        assert_eq!(grab, 5.0);
+        assert!((mid.scroll_at(y, grab) - 100.0).abs() < 1.0);
+        let outside = mid.grab(1.0);
+        assert_eq!(outside, mid.thumb.h as f64 / 2.0);
+        assert_eq!(mid.scroll_at(-50.0, grab), 0.0);
+        assert_eq!(mid.scroll_at(1000.0, grab), 200.0);
+    }
+
+    #[test]
+    fn surfaces_shade_from_their_base() {
+        let base = rgba(0x40, 0x40, 0x40, 0x80);
+        assert_eq!(surface_shade_in(Surface::Flat, base, 0.5), base);
+        let top = surface_shade_in(Surface::Gradient, base, 0.0);
+        let bottom = surface_shade_in(Surface::Gradient, base, 1.0);
+        assert!(luminance(top) > luminance(bottom));
+        assert_eq!(bottom.to_color_u8(), base.to_color_u8());
+        assert_eq!(top.alpha(), base.alpha());
+        let band = surface_shade_in(Surface::Glossy, base, 0.49);
+        let below = surface_shade_in(Surface::Glossy, base, 0.5);
+        assert!(luminance(band) > luminance(below));
+        assert!(luminance(gloss(base, 0.0, 0.1)) > luminance(gloss(base, 0.1, 0.1)));
+        assert_eq!(gloss(base, 0.1, 0.1).to_color_u8(), base.to_color_u8());
+    }
+
+    #[test]
+    fn derived_colors_read_on_their_backgrounds() {
+        let white = rgb(0xff, 0xff, 0xff);
+        let black = rgb(0, 0, 0);
+        assert_eq!(blend(black, white, 0.0).to_color_u8(), black.to_color_u8());
+        assert_eq!(blend(black, white, 1.0).to_color_u8(), white.to_color_u8());
+        assert_eq!(
+            blend(rgba(0, 0, 0, 0x80), white, 0.5).alpha(),
+            rgba(0, 0, 0, 0x80).alpha()
+        );
+        assert!(luminance(white) > 0.99 && luminance(black) < 0.01);
+        assert_eq!(
+            shifted(rgb(0xf0, 0x10, 0x80), 40).to_color_u8(),
+            rgb(0xff, 0x38, 0xa8).to_color_u8()
+        );
+        set_theme(Theme {
+            accent: rgb(0xf5, 0xf5, 0x60),
+            text: rgb(0x10, 0x10, 0x10),
+            ..Theme::default()
+        });
+        assert!(!light_text());
+        assert_eq!(on_accent().to_color_u8(), rgb(0x10, 0x10, 0x10).to_color_u8());
+        assert!(luminance(text_shadow()) > 0.5);
+        set_theme(Theme::default());
+        assert!(light_text());
+        assert_eq!(on_accent().to_color_u8(), Color::WHITE.to_color_u8());
+        assert!(luminance(text_shadow()) < 0.5);
+    }
+
+    #[test]
+    fn radii_follow_the_style() {
+        set_style(WindowStyle {
+            corners: 0,
+            ..WindowStyle::default()
+        });
+        assert_eq!(popup_radius(), 0.0);
+        assert_eq!(panel_radius(), 0.0);
+        set_style(WindowStyle {
+            corners: 6,
+            ..WindowStyle::default()
+        });
+        assert_eq!(popup_radius(), 6.0);
+        assert_eq!(panel_radius(), 8.0);
+        set_style(WindowStyle::default());
+    }
+}

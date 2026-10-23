@@ -1103,3 +1103,23 @@ fn draw_tiles(d: &mut Desktop, canvas: &mut Canvas<'_>, layout: &Layout) {
     }
     canvas.reset_clip();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_and_tiles_place_cells_by_width() {
+        let apps = Rect::new(10, 20, 290, 300);
+        assert_eq!(grid_columns(apps), 4);
+        assert_eq!(grid_columns(Rect::new(0, 0, 10, 10)), 1);
+        let tiles = Rect::new(230, 20, 260, 300);
+        assert_eq!(tile_rect(tiles, 0), Rect::new(230, 20, TILE, TILE));
+        assert_eq!(tile_rect(tiles, 2).x, 230 + 2 * (TILE + TILE_GAP));
+        assert_eq!(
+            tile_rect(tiles, 3),
+            Rect::new(230, 20 + TILE + TILE_GAP, TILE, TILE)
+        );
+        assert!(tile_rect(tiles, 2).right() <= tiles.right());
+    }
+}

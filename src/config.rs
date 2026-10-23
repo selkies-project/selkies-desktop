@@ -843,4 +843,31 @@ mod tests {
         assert!(!config.window.decorate);
         assert_eq!(Config::default().window, WindowStyle::default());
     }
+
+    #[test]
+    fn falls_back_on_unknown_words_and_clamps() {
+        let mut values = HashMap::new();
+        values.insert("window_surface".to_string(), "shiny".to_string());
+        values.insert("window_buttons".to_string(), "middle".to_string());
+        values.insert("window_glyphs".to_string(), "stars".to_string());
+        values.insert("window_corners".to_string(), "-3".to_string());
+        values.insert("menu_layout".to_string(), "spiral".to_string());
+        values.insert("panel_layout".to_string(), "center".to_string());
+        values.insert("panel_margin".to_string(), "99".to_string());
+        values.insert("start_label".to_string(), "   ".to_string());
+        let config = Config::from_values(&values);
+        assert_eq!(config.window.surface, Surface::Flat);
+        assert_eq!(config.window.buttons, ButtonSide::Right);
+        assert_eq!(config.window.glyphs, Glyphs::Lines);
+        assert_eq!(config.window.corners, 0);
+        assert_eq!(config.menu_layout, MenuLayout::Columns);
+        assert!(config.panel_centered);
+        assert_eq!(config.panel_margin, MAX_PANEL_MARGIN);
+        assert_eq!(config.start_label, None);
+        let saved = parse("panel_layout = centered\nmenu_layout = tiles\nstart_label = \"Start \"\n");
+        let config = Config::from_values(&saved);
+        assert!(config.panel_centered);
+        assert_eq!(config.menu_layout, MenuLayout::Tiles);
+        assert_eq!(config.start_label.as_deref(), Some("Start"));
+    }
 }

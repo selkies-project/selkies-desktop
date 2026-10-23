@@ -2551,3 +2551,64 @@ pub fn key(d: &mut Desktop, key: Key) {
     }
     d.redraw_panel();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A config built from a preset's own changes.
+    fn config_from(changes: &[(&str, String)]) -> Config {
+        let values: HashMap<String, String> = changes
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect();
+        Config::from_values(&values)
+    }
+
+    #[test]
+    fn each_style_matches_only_itself() {
+        for style in &STYLES {
+            let config = config_from(&style.changes());
+            assert_eq!(current_style(&config), Some(style.name));
+            assert_eq!(style.changes().len(), 7);
+        }
+        assert_eq!(current_style(&Config::default()), Some("Linux"));
+        let mut odd = Config::default();
+        odd.window.corners = 3;
+        assert_eq!(current_style(&odd), None);
+    }
+
+    #[test]
+    fn each_scheme_matches_only_itself() {
+        for (name, colors) in &SCHEMES {
+            let changes: Vec<(&str, String)> = COLOR_KEYS
+                .iter()
+                .zip(colors)
+                .map(|(key, color)| (*key, color.to_string()))
+                .collect();
+            assert_eq!(current_scheme(config_from(&changes).theme), Some(*name));
+        }
+        assert_eq!(current_scheme(ui::Theme::default()), Some("Dark"));
+        let theme = ui::Theme {
+            accent: parse_color("#123456").unwrap(),
+            ..ui::Theme::default()
+        };
+        assert_eq!(current_scheme(theme), None);
+    }
+
+    #[test]
+    fn swatch_rows_fit_on_one_line() {
+        let page = page_rect_in(Rect::new(0, 0, WIDTH, HEIGHT));
+        let area = page.w - 2 * CARD_PAD - TITLE_WIDTH;
+        for presets in [&SWATCHES[..], &ACCENTS[..], &SURFACES[..], &TEXTS[..]] {
+            let mut widths: Vec<i32> = presets.iter().map(|_| SWATCH).collect();
+            widths.push(PICKER_BUTTON);
+            assert_eq!(flow(0, area, &widths).1, 1);
+            for swatch in presets {
+                assert!(parse_color(swatch).is_some(), "{swatch}");
+            }
+        }
+        assert_eq!(flow(0, 100, &[60, 60]).1, 2);
+    }
+}
