@@ -39,7 +39,15 @@ breaks that and needs a maintainer's agreement.
 ## Testing
 
 `cargo test`, `cargo clippy --all-targets -- -D warnings` and `pre-commit run --all-files` are the
-floor.  This repository builds and publishes the binary and holds no Docker build logic; the
+floor.  A feature lands with unit tests for the logic that can be tested without a display:
+parsing and clamping of its settings, the text or bitmaps it generates, layout and geometry
+arithmetic, and any edit that is applied repeatedly, which must settle after one pass so the
+desktop does not rewrite files or signal the window manager on every config write.  Presets are
+tested as bundles: each must match a config built from its own changes and nothing else.  A test
+in `src/i18n.rs` scans the sources for every `tr` and `trf` key and fails until each has a line in
+every locale file, so new labels go into all of `locales/*.txt` in the same change.  What needs a
+compositor, a window manager or a screenshot is checked in a container as described below and
+is reported as such, not left untested in silence.  This repository builds and publishes the binary and holds no Docker build logic; the
 images that run it live in docker-baseimage-selkies.  Everything visible is tested in a container
 from an `lsiobase/selkies` image (`debiantrixie`, `arch`, `alpine324`) with the static musl build
 copied over `/usr/bin/selkies-desktop`, one with `PIXELFLUX_WAYLAND=true` for labwc and one without
@@ -66,5 +74,9 @@ Releases: a push to `main` publishes the static binaries to a pre-release named 
 commit hash; a `MAJOR.MINOR.PATCH` tag releases with `release-notes/<tag>.md` as its body, and
 `Cargo.toml` carries the same version as the tag.  The release workflow refuses a tag whose notes
 are missing or whose version differs, so a release commit bumps `Cargo.toml` and adds the notes
-together.  The assets are `selkies-desktop-x86_64` and `selkies-desktop-aarch64`, each with a
+together.  The notes are kept as the work happens, not written at release time: every change a
+user can see, a feature, a setting, a fix or a removal, adds or amends a line in the notes of the
+version in `Cargo.toml` in the same commit, in the same plain prose as the existing files and
+the README, naming the setting keys it adds.  Once a version is tagged its notes are frozen;
+the next user-visible change bumps `Cargo.toml` and starts `release-notes/<new version>.md`.  The assets are `selkies-desktop-x86_64` and `selkies-desktop-aarch64`, each with a
 `.sha256`; the images download them, nothing is built downstream.
