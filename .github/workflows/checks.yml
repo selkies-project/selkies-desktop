@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   workflows:
     name: Lint the workflow files
@@ -40,25 +44,76 @@ jobs:
           tar -xJf shellcheck.tar.xz --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
           PATH="${PWD}:${PATH}" ./actionlint -color
 
-  build:
-    name: Build
+  cargo:
+    name: cargo test (${{ matrix.target.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+
+      - name: cargo build and test
+        run: cargo build && cargo test
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: The binary starts and reports the display it lacks
+        # A runner has neither a layer-shell compositor nor an X server, so the
+        # one thing a headless check can hold the binary to is that it runs
+        # and says so rather than crashing
+        run: |
+          out="$(target/debug/selkies-desktop 2>&1 || true)"
+          echo "${out}"
+          echo "${out}" | grep -q "no Wayland layer shell compositor or X11 display available"
+          target/debug/selkies-desktop --version
+
+      - name: The pointer driver builds
+        run: cargo build --manifest-path tests/driver/Cargo.toml
+
+  static:
+    name: static binary (${{ matrix.target.arch }})
+    needs: cargo
+    uses: ./.github/workflows/build.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+          - arch: aarch64
+    with:
+      arch: ${{ matrix.target.arch }}
+
+  pre-commit:
+    name: pre-commit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the build dependencies
-        # The same packages README.md names, on the distribution the desktop
-        # images are built from
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+
+      - name: pre-commit
+        # clippy builds the crate, which the cargo jobs do
+        env:
+          SKIP: clippy
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential pkg-config \
-            libcairo2-dev libwayland-dev libx11-dev libxext-dev wayland-protocols
-      - name: Build
-        run: make -j"$(nproc)"
-      - name: The binary starts and reports the display it lacks
-        # A runner has neither a layer-shell compositor nor an X server, so the
-        # one thing a headless check can hold the binary to is that it links,
-        # runs, and says so rather than crashing
-        run: |
-          out="$(./selkies-desktop 2>&1 || true)"
-          echo "${out}"
-          echo "${out}" | grep -q "no Wayland layer shell compositor or X11 display available"
+          python3 -m pip install "pre-commit==4.6.*"
+          pre-commit run --all-files --show-diff-on-failure

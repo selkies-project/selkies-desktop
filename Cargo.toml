@@ -1,0 +1,42 @@
+[package]
+name = "selkies-desktop"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+repository = "https://github.com/selkies-project/selkies-desktop"
+readme = "README.md"
+keywords = ["wayland", "x11", "panel", "taskbar", "labwc"]
+categories = ["gui"]
+description = "The panel, start menu, taskbar and desktop layer of Selkies containers, over labwc or openbox."
+license = "MPL-2.0"
+
+[[bin]]
+name = "selkies-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# Both display servers are spoken natively, so the binary links no system library:
+# the Wayland backend uses wayland-client's pure Rust transport and the X11 one
+# x11rb's, which makes one static build serve every distribution the layers ship.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-cursor = "0.31"
+x11rb = { version = "0.14", features = ["shape", "shm", "randr", "cursor", "resource_manager"] }
+# Drawing: tiny-skia rasterizes, cosmic-text shapes and renders text from the
+# system fonts, resvg renders SVG icons, image decodes PNG and JPEG.
+tiny-skia = "0.12"
+cosmic-text = "0.19"
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Keysym names and the characters they produce, for the menu's search box.
+xkeysym = "0.2"
+libc = "0.2"
+memmap2 = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = 1
+strip = "debuginfo"

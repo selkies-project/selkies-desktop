@@ -1,0 +1,61 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Build
+
+# The static musl binary of one architecture, built on a runner of that
+# architecture and left as a `selkies-desktop-<arch>` artifact of the calling
+# run with a checksum file beside it.  The checks and the pre-release share it.
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: x86_64 or aarch64
+        type: string
+        required: true
+      ref:
+        description: Git ref to build; the calling run's commit when empty
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    name: selkies-desktop (${{ inputs.arch }})
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: ${{ inputs.arch }}-unknown-linux-musl
+
+      - name: Build the static binary
+        # .cargo/config.toml makes the musl target self-contained: rustup's CRT
+        # objects and rust-lld, no system cross toolchain
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: cargo build --release --target "${ARCH}-unknown-linux-musl"
+
+      - name: Name and checksum
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          mkdir -p out
+          cp "target/${ARCH}-unknown-linux-musl/release/selkies-desktop" "out/selkies-desktop-${ARCH}"
+          cd out && sha256sum "selkies-desktop-${ARCH}" > "selkies-desktop-${ARCH}.sha256"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: selkies-desktop-${{ inputs.arch }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7

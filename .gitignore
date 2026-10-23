@@ -1,13 +1,7 @@
-selkies-desktop
-*.o
-wlr-layer-shell.c
-wlr-layer-shell.h
-wlr-foreign-toplevel-management-unstable-v1.c
-wlr-foreign-toplevel-management-unstable-v1.h
-xdg-shell-protocol.c
-xdg-shell-protocol.h
+/target
+/tests/driver/target
 .vscode/
-compile_commands.json
 *.swp
 *~
 .DS_Store
+/tests/trayicon/target

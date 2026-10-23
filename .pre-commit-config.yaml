@@ -1,0 +1,26 @@
+# The formatting and lint checks CI runs, moved ahead of the commit:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# rustfmt and clippy come with the toolchain (`rustup component add rustfmt clippy`).
+repos:
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: rustfmt
+        language: system
+        types: [rust]
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
