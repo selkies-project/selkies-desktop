@@ -70,15 +70,22 @@ A bind-mounted binary keeps its inode when cargo rebuilds, so copy a new build i
 `docker cp` or restart the container.  Every claim in a report has been run that way, and anything
 that could not be run says so.
 
-Releases: a push to `main` publishes the static binaries to a pre-release named by the short
-commit hash; a `MAJOR.MINOR.PATCH` tag releases with `release-notes/<tag>.md` as its body, and
-`Cargo.toml` carries the same version as the tag (a `-rc1` style pre-release carries the version it
-leads to, and its notes by default).  The release workflow is run from the Actions tab with the tag,
-which it creates on the commit of `main` the run started from, or by pushing the tag.  It refuses a
-tag whose notes are missing or whose version differs, so a release commit bumps `Cargo.toml` and
-adds the notes together.  The notes are kept as the work happens, not written at release time: every change a
-user can see, a feature, a setting, a fix or a removal, adds or amends a line in the notes of the
-version in `Cargo.toml` in the same commit, in the same plain prose as the existing files and
-the README, naming the setting keys it adds.  Once a version is tagged its notes are frozen;
-the next user-visible change bumps `Cargo.toml` and starts `release-notes/<new version>.md`.  The assets are `selkies-desktop-x86_64` and `selkies-desktop-aarch64`, each with a
-`.sha256`; the images download them, nothing is built downstream.
+Releases: a push to `main` publishes the static binaries to a pre-release named by the short commit
+hash; a `MAJOR.MINOR.PATCH` tag releases with `release-notes/<tag>.md` as its body, and `Cargo.toml`
+carries the same version as the tag (a `-rc1` style pre-release carries the version it leads to, and
+its notes by default).  Releases are cut by running the
+[Release](https://github.com/selkies-project/selkies-desktop/actions/workflows/release.yml) workflow
+from the Actions tab, **Run workflow** with **Use workflow from** on `main` and the tag, or by
+pushing the tag.  A run releases the commit it started from: a new tag is created on it once the
+checks pass, and a tag that already exists has to be on it, so an earlier commit's tag is released
+by a run started from that tag.  The `latest` input decides the "Latest" badge: `auto` gives it to a
+release and not to a pre-release, `never` holds it back for a fix to an older series, and `always`
+gives it to a pre-release as well.  The release workflow refuses a tag whose notes are missing or
+whose version differs, so a release commit bumps `Cargo.toml` and adds the notes together.  The
+notes are kept as the work happens, not written at release time: every change a user can see, a
+feature, a setting, a fix or a removal, adds or amends a line in the notes of the version in
+`Cargo.toml` in the same commit, in the same plain prose as the existing files and the README,
+naming the setting keys it adds.  Once a version is tagged its notes are frozen; the next
+user-visible change bumps `Cargo.toml` and starts `release-notes/<new version>.md`.  The assets are
+`selkies-desktop-x86_64` and `selkies-desktop-aarch64`, each with a `.sha256`; the images download
+them, nothing is built downstream.

@@ -4,12 +4,18 @@
 
 name: Release
 
-# A tag push releases that tag.  The tag is a semantic version; a pre-release
-# such as 1.1.0-rc1 is released as one.  Its notes come from
-# release-notes/<tag>.md, or from the notes of the release it leads to, and
-# Cargo.toml carries the version the tag leads to.  A manual run releases the
-# tag it names, tagging the commit it started from when the tag is new, and
-# decides the "Latest" badge.
+# A release is cut by running this workflow from the Actions tab with the tag,
+# or by pushing the tag. A run releases the commit it started from: a manual
+# run creates a new tag on it, cut from main, once the checks pass, and a tag
+# that already exists has to be on it, so an earlier commit's tag is released
+# by a run started from that tag. The latest input decides the "Latest" badge:
+# auto gives it to a release and not to a pre-release, never holds it back for
+# a fix to an older series, and always gives it to a pre-release too, which is
+# then released as a release since GitHub gives the badge to no pre-release.
+#
+# The tag is a semantic version and Cargo.toml carries the version it leads
+# to: a pre-release such as 1.1.0-rc1 is released as one, with its own notes
+# or those of the release it leads to.
 
 on:
   push:
@@ -18,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build and publish, tagging this run's commit when it is new (e.g. 1.1.0 or 1.1.0-rc1)
+        description: Release tag, created on this run's commit when it is new (e.g. 1.1.0 or 1.1.0-rc1)
         type: string
         required: true
       latest:
@@ -31,47 +37,26 @@ permissions:
   contents: read
 
 env:
+  # The tag this run releases: the pushed one, or the one a manual run names
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   check:
-    name: The tag matches Cargo.toml and has release notes
+    name: Check the tag
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
       notes: ${{ steps.notes.outputs.path }}
     steps:
-      - name: Check the tag is a semantic version
+      - name: Check the tag is a version
+        # A semantic version, a pre-release taking -rc, -beta, or -alpha and a number
         run: |
           echo "${RELEASE_TAG}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)[0-9]+)?$' \
             || { echo "::error::${RELEASE_TAG} is not a version (1.1.0, 1.1.0-rc1)"; exit 1; }
 
-      - name: Tag the commit this run started from
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > /dev/null 2>&1; then
-            echo "${RELEASE_TAG} is already tagged"
-          else
-            [ "${GITHUB_REF}" = refs/heads/main ] || { echo "::error::a new tag is cut from main; this run started from ${GITHUB_REF_NAME}"; exit 1; }
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${RELEASE_TAG}" -f sha="${GITHUB_SHA}"
-          fi
-
-      - name: Check the tag is on main
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${RELEASE_TAG}" --jq .status)"
-          case "${status}" in
-            identical|behind) ;;
-            *) echo "::error::${RELEASE_TAG} points at a commit that is not on main (${status:-unknown})"; exit 1 ;;
-          esac
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - name: Check the crate version matches the tag
@@ -83,10 +68,44 @@ jobs:
       - name: Resolve the release notes
         id: notes
         run: |
+          # A pre-release carries the notes of the release it leads to unless it
+          # was given its own
           path="release-notes/${RELEASE_TAG}.md"
           [ -s "${path}" ] || path="release-notes/${RELEASE_TAG%%-*}.md"
           [ -s "${path}" ] || { echo "::error::no release notes for ${RELEASE_TAG}"; exit 1; }
           echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag is on main
+        # A release is cut from main and its tags alone: a commit that is not on
+        # main is refused before anything is tagged, built, or released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)"
+          case "${status}" in
+            identical|behind) ;;
+            *) echo "::error::${RELEASE_TAG} is on a commit that is not on main (${status:-unknown})"; exit 1 ;;
+          esac
+
+      - name: Tag the commit this run started from
+        # The checks above have passed, so a refused run leaves no tag behind. A
+        # new tag is cut from main; one that already exists, a pushed one
+        # included, has to be on this run's commit, which is what is built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > /dev/null 2>&1; then
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${RELEASE_TAG}" --jq .status)"
+            [ "${status}" = identical ] \
+              || { echo "::error::${RELEASE_TAG} tags another commit than this run's; start the run from the tag (Use workflow from)"; exit 1; }
+            echo "${RELEASE_TAG} tags ${GITHUB_SHA}"
+          else
+            [ "${GITHUB_REF}" = refs/heads/main ] \
+              || { echo "::error::a new tag is cut from main; this run started from ${GITHUB_REF_NAME}"; exit 1; }
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" -f sha="${GITHUB_SHA}" > /dev/null
+            echo "${RELEASE_TAG} now tags ${GITHUB_SHA}"
+          fi
 
   build:
     needs: check
@@ -103,6 +122,7 @@ jobs:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
 
   release:
+    name: Release
     needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
@@ -110,7 +130,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -124,6 +143,9 @@ jobs:
         env:
           LATEST: ${{ inputs.latest }}
         run: |
+          # A release takes the "Latest" badge and a pre-release does not,
+          # unless a manual run says otherwise; GitHub gives the badge to no
+          # pre-release, so one designated takes it marked as a release.
           is_prerelease() { echo "$1" | grep -q -- '-'; }
           case "${LATEST:-auto}" in
             always) latest=true ;;
@@ -132,7 +154,10 @@ jobs:
           esac
           prerelease=false
           if [ "${latest}" = false ] && is_prerelease "${RELEASE_TAG}"; then prerelease=true; fi
-          { echo "prerelease=${prerelease}"; echo "make_latest=${latest}"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "prerelease=${prerelease}"
+            echo "make_latest=${latest}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create the release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3

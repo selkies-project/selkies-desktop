@@ -169,10 +169,17 @@ each.  A push to `main` publishes them as a pre-release named by the short
 commit hash; a `MAJOR.MINOR.PATCH` tag publishes a release whose notes are
 `release-notes/<tag>.md`, with `Cargo.toml` carrying the same version.  A
 `-rc1` style tag is published as a pre-release using the notes of the release
-it leads to.  A release is cut by running the
+it leads to.
+
+Releases are cut by running the
 [Release](https://github.com/selkies-project/selkies-desktop/actions/workflows/release.yml)
-workflow from `main` with the tag, which tags that commit and decides the
-"Latest" badge, or by pushing the tag.
+workflow from the Actions tab, **Run workflow** with **Use workflow from** on
+`main` and the tag, or by pushing the tag.  A run releases the commit it
+started from: a new tag is created on it once the checks pass, and a tag that
+already exists has to be on it, so an earlier commit's tag is released by a
+run started from that tag.  The `latest` input decides the "Latest" badge:
+`auto` gives it to a release and not to a pre-release, `never` holds it back
+for a fix to an older series, and `always` gives it to a pre-release as well.
 
 An image installs the desktop by placing the binary at
 `/usr/bin/selkies-desktop`.  It links no system library and speaks Wayland
