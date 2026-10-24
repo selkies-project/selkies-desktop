@@ -167,7 +167,12 @@ Every release on GitHub carries `selkies-desktop-x86_64` and
 `selkies-desktop-aarch64`, static musl binaries with a `.sha256` file beside
 each.  A push to `main` publishes them as a pre-release named by the short
 commit hash; a `MAJOR.MINOR.PATCH` tag publishes a release whose notes are
-`release-notes/<tag>.md`, with `Cargo.toml` carrying the same version.
+`release-notes/<tag>.md`, with `Cargo.toml` carrying the same version.  A
+`-rc1` style tag is published as a pre-release using the notes of the release
+it leads to.  A release is cut by running the
+[Release](https://github.com/selkies-project/selkies-desktop/actions/workflows/release.yml)
+workflow from `main` with the tag, which tags that commit and decides the
+"Latest" badge, or by pushing the tag.
 
 An image installs the desktop by placing the binary at
 `/usr/bin/selkies-desktop`.  It links no system library and speaks Wayland
