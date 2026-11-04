@@ -275,16 +275,30 @@ pub struct Desktop {
 }
 
 impl Desktop {
-    /// Loads settings, fonts, icons and applications.
+    /// Loads settings, fonts, icons and applications, and applies the
+    /// settings to the session: the window manager's theme, and the file
+    /// manager's desktop entry and folder default.
     pub fn new() -> Desktop {
+        Desktop::load(true)
+    }
+
+    /// Loads settings, fonts, icons and applications.
+    ///
+    /// # Arguments
+    /// * `session` - Whether to apply the settings to the session as well,
+    ///   as `new` does; without it nothing is written to the user's files
+    ///   and no window manager is signaled, which is how tests build one.
+    pub fn load(session: bool) -> Desktop {
         let config = Config::load();
         crate::i18n::select(config.language.as_deref());
         ui::set_theme(config.theme);
         ui::set_style(config.window);
-        crate::wmtheme::apply(&config);
+        if session {
+            crate::wmtheme::apply(&config);
+        }
         let fonts = Fonts::new();
         let icons = Icons::new(config.icon_theme.as_deref());
-        if config.files_manager {
+        if session && config.files_manager {
             entries::ensure_files_entry();
         }
         let apps = Apps::load(&config);

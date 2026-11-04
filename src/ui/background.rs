@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn layers_split_the_wallpaper_from_the_launchers() {
-        let mut d = Desktop::new();
+        let mut d = Desktop::load(false);
         d.apps.desktop = vec![launcher("one")];
         configure(&mut d, 7, true);
         let (wallpaper, launchers) = d
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_secondary_background_has_an_empty_launcher_layer_and_no_redraw_without_change() {
-        let mut d = Desktop::new();
+        let mut d = Desktop::load(false);
         d.apps.desktop = vec![launcher("one")];
         configure(&mut d, 1, true);
         configure(&mut d, 2, false);
