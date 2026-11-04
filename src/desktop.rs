@@ -93,6 +93,7 @@ pub struct BackgroundSurface {
     /// Whether this surface shows the desktop icons.
     pub primary: bool,
     pix: Option<Pixmap>,
+    launchers_pix: Option<Pixmap>,
     dirty: bool,
     /// The wallpaper layer rendered for the geometry and monitors, drawn
     /// under the icons.
@@ -1037,6 +1038,7 @@ impl Desktop {
                         monitors: vec![Rect::new(0, 0, width, height)],
                         primary: first,
                         pix: None,
+                        launchers_pix: None,
                         dirty: true,
                         wallpaper_cache: None,
                     });
@@ -1055,6 +1057,7 @@ impl Desktop {
                     background.monitors = vec![Rect::new(0, 0, width, height)];
                 }
                 background.pix = None;
+                background.launchers_pix = None;
                 background.dirty = true;
             }
             SurfaceId::Window(id) => {
@@ -1742,6 +1745,73 @@ impl Desktop {
             visible: vec![whole],
             grab: false,
         })
+    }
+
+    /// Renders a background surface as two layers when it changed: the
+    /// wallpaper alone, and the launchers over a transparent canvas, for a
+    /// backend that shows them above the wallpaper layers of other programs.
+    ///
+    /// # Arguments
+    /// * `id` - The background surface.
+    ///
+    /// # Returns
+    /// The wallpaper frame, which takes no input, and the launchers frame,
+    /// whose input is the launcher cells; `None` when nothing changed.
+    pub fn render_background_layers(&mut self, id: u32) -> Option<(Frame<'_>, Frame<'_>)> {
+        let index = self.backgrounds.iter().position(|b| b.id == id)?;
+        let geometry = self.backgrounds[index].geometry;
+        if !geometry.configured || !self.backgrounds[index].dirty {
+            return None;
+        }
+        self.backgrounds[index].dirty = false;
+        let (w, h) = (
+            (geometry.width * geometry.scale) as u32,
+            (geometry.height * geometry.scale) as u32,
+        );
+        let mut pix = match self.backgrounds[index].pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        let mut launchers = match self.backgrounds[index].launchers_pix.take() {
+            Some(pix) if pix.width() == w && pix.height() == h => pix,
+            _ => Pixmap::new(w, h)?,
+        };
+        launchers.fill(tiny_skia::Color::TRANSPARENT);
+        {
+            let mut canvas = Canvas::new(pix.as_mut(), geometry.scale);
+            background::draw_wallpaper_layer(self, id, &mut canvas);
+        }
+        {
+            let mut canvas = Canvas::new(launchers.as_mut(), geometry.scale);
+            background::draw_launchers(self, id, &mut canvas);
+        }
+        let whole = Rect::new(0, 0, geometry.width, geometry.height);
+        let cells = if self.backgrounds[index].primary {
+            background::cells(self)
+        } else {
+            Vec::new()
+        };
+        self.backgrounds[index].pix = Some(pix);
+        self.backgrounds[index].launchers_pix = Some(launchers);
+        let surface = &self.backgrounds[index];
+        Some((
+            Frame {
+                pixmap: surface.pix.as_ref()?,
+                scale: geometry.scale,
+                damage: vec![whole],
+                input: Vec::new(),
+                visible: vec![whole],
+                grab: false,
+            },
+            Frame {
+                pixmap: surface.launchers_pix.as_ref()?,
+                scale: geometry.scale,
+                damage: vec![whole],
+                input: cells.clone(),
+                visible: cells,
+                grab: false,
+            },
+        ))
     }
 
     /// Renders a file manager window when it changed.

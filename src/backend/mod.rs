@@ -47,6 +47,27 @@ pub trait Backend {
     /// * `frame` - The pixels and the regions that changed.
     fn present(&mut self, surface: SurfaceId, frame: &Frame<'_>);
 
+    /// Whether the desktop's launchers go on a layer of their own above the
+    /// wallpaper, so that another program's wallpaper layer stays beneath
+    /// them instead of covering them.
+    ///
+    /// # Returns
+    /// `true` where `present_launchers` shows the launchers; otherwise a
+    /// background's frame carries them.
+    fn layered_desktop(&self) -> bool {
+        false
+    }
+
+    /// Shows a background's launchers on their own layer, where the backend
+    /// keeps one (`layered_desktop`); input on that layer reaches the desktop
+    /// as the background's.
+    ///
+    /// # Arguments
+    /// * `background` - The background the launchers belong to.
+    /// * `frame` - The launchers over a transparent canvas, taking input on
+    ///   their cells.
+    fn present_launchers(&mut self, _background: u32, _frame: &Frame<'_>) {}
+
     /// Carries out a request from the desktop.
     ///
     /// # Arguments

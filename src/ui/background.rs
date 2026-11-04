@@ -81,6 +81,17 @@ pub fn hit(d: &Desktop, id: u32, x: f64, y: f64) -> Option<usize> {
 /// * `id` - The background surface.
 /// * `canvas` - The surface's canvas.
 pub fn draw(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
+    draw_wallpaper_layer(d, id, canvas);
+    draw_launchers(d, id, canvas);
+}
+
+/// Draws the wallpaper of each monitor a background surface spans.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `id` - The background surface.
+/// * `canvas` - The surface's canvas.
+pub fn draw_wallpaper_layer(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     let Some(index) = d.backgrounds.iter().position(|b| b.id == id) else {
         return;
     };
@@ -117,7 +128,17 @@ pub fn draw(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
     if let Some((_, layer)) = &d.backgrounds[index].wallpaper_cache {
         canvas.draw_image_stretch(layer, whole);
     }
-    if !d.backgrounds[index].primary {
+}
+
+/// Draws the launchers over what a canvas already holds, on the primary
+/// background surface only.
+///
+/// # Arguments
+/// * `d` - The desktop.
+/// * `id` - The background surface.
+/// * `canvas` - The surface's canvas.
+pub fn draw_launchers(d: &mut Desktop, id: u32, canvas: &mut Canvas<'_>) {
+    if !d.background(id).is_some_and(|b| b.primary) {
         return;
     }
 
@@ -213,5 +234,100 @@ fn draw_wallpaper(canvas: &mut Canvas<'_>, area: Rect, wallpaper: &Wallpaper, im
             }
         }
         canvas.reset_clip();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::entries::Entry;
+    use crate::event::{Event, SurfaceId};
+
+    fn launcher(name: &str) -> Entry {
+        Entry {
+            id: format!("{name}.desktop"),
+            name: name.to_string(),
+            comment: None,
+            generic_name: None,
+            keywords: Vec::new(),
+            exec: name.to_string(),
+            icon: None,
+            path: PathBuf::from(format!("/nonexistent/{name}.desktop")),
+            terminal: false,
+            working_dir: None,
+            category: String::new(),
+            wm_class: None,
+        }
+    }
+
+    fn configure(d: &mut Desktop, id: u32, primary: bool) {
+        d.handle(Event::Configured {
+            surface: SurfaceId::Background(id),
+            width: 320,
+            height: 240,
+            scale: 1,
+        });
+        d.handle(Event::BackgroundLayout {
+            surface: id,
+            monitors: vec![Rect::new(0, 0, 320, 240)],
+            primary,
+        });
+    }
+
+    fn alpha(pixmap: &Pixmap, x: i32, y: i32) -> u8 {
+        pixmap.pixel(x as u32, y as u32).map_or(0, |p| p.alpha())
+    }
+
+    #[test]
+    fn layers_split_the_wallpaper_from_the_launchers() {
+        let mut d = Desktop::new();
+        d.apps.desktop = vec![launcher("one")];
+        configure(&mut d, 7, true);
+        let (wallpaper, launchers) = d
+            .render_background_layers(7)
+            .expect("a configured background renders");
+        assert!(wallpaper.input.is_empty(), "the wallpaper takes no input");
+        assert_eq!(
+            launchers.input.len(),
+            1,
+            "the launcher layer takes input on its cell"
+        );
+        let cell = launchers.input[0];
+        let outside = (cell.right() + 20, cell.bottom() + 20);
+        assert_eq!(
+            alpha(launchers.pixmap, outside.0, outside.1),
+            0,
+            "transparent outside the cells"
+        );
+        assert_eq!(
+            alpha(wallpaper.pixmap, outside.0, outside.1),
+            255,
+            "the wallpaper is opaque"
+        );
+        let painted = (cell.x..cell.right())
+            .flat_map(|x| (cell.y..cell.bottom()).map(move |y| (x, y)))
+            .any(|(x, y)| alpha(launchers.pixmap, x, y) > 0);
+        assert!(painted, "the launcher is drawn in its cell");
+    }
+
+    #[test]
+    fn a_secondary_background_has_an_empty_launcher_layer_and_no_redraw_without_change() {
+        let mut d = Desktop::new();
+        d.apps.desktop = vec![launcher("one")];
+        configure(&mut d, 1, true);
+        configure(&mut d, 2, false);
+        {
+            let (_, launchers) = d
+                .render_background_layers(2)
+                .expect("a configured background renders");
+            assert!(launchers.input.is_empty());
+            assert!(launchers.pixmap.pixels().iter().all(|p| p.alpha() == 0));
+        }
+        assert!(
+            d.render_background_layers(2).is_none(),
+            "nothing changed, nothing to render"
+        );
     }
 }

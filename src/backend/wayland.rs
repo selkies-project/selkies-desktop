@@ -85,7 +85,32 @@ struct Output {
     output: wl_output::WlOutput,
     scale: i32,
     background: Option<Surface>,
+    /// The launchers' layer above the wallpaper, where another program's
+    /// wallpaper layer stays beneath them.
+    launchers: Option<Surface>,
+    /// A launchers frame that came before that layer was configured, shown
+    /// once it is.
+    pending_launchers: Option<PendingFrame>,
 }
+
+/// A frame kept until its surface can show it.
+struct PendingFrame {
+    pixmap: tiny_skia::Pixmap,
+    scale: i32,
+    input: Vec<Rect>,
+}
+
+/// A surface `State::present_target` draws into.
+#[derive(Clone, Copy)]
+enum Target {
+    /// A surface the desktop names.
+    Surface(SurfaceId),
+    /// The launchers layer of an output, by its number.
+    Launchers(u32),
+}
+
+/// The user data of an output's launchers layer: the output's number.
+struct LauncherLayer(u32);
 
 /// The shell role of a surface.
 enum Role {
@@ -204,7 +229,8 @@ struct State {
 }
 
 impl State {
-    /// The surface a Wayland surface object stands for.
+    /// The surface a Wayland surface object stands for; an output's launchers
+    /// layer stands for its background.
     fn surface_id(&self, wl: &wl_surface::WlSurface) -> Option<SurfaceId> {
         if self.panel.as_ref().is_some_and(|s| s.wl == *wl) {
             return Some(SurfaceId::Panel);
@@ -214,8 +240,122 @@ impl State {
         }
         self.outputs
             .iter()
-            .find(|o| o.background.as_ref().is_some_and(|s| s.wl == *wl))
+            .find(|o| {
+                o.background.as_ref().is_some_and(|s| s.wl == *wl)
+                    || o.launchers.as_ref().is_some_and(|s| s.wl == *wl)
+            })
             .map(|o| SurfaceId::Background(o.name))
+    }
+
+    /// Mutable access to a surface `present_target` draws into.
+    fn target_mut(&mut self, target: Target) -> Option<&mut Surface> {
+        match target {
+            Target::Surface(id) => self.surface_mut(id),
+            Target::Launchers(name) => self
+                .outputs
+                .iter_mut()
+                .find(|o| o.name == name)?
+                .launchers
+                .as_mut(),
+        }
+    }
+
+    /// Copies a frame into a free buffer of a surface and commits it; a
+    /// launchers frame takes its background's size and scale, and waits until
+    /// its layer is configured.
+    fn present_target(&mut self, qh: &QueueHandle<State>, target: Target, frame: &Frame<'_>) {
+        if let Target::Launchers(name) = target {
+            let Some(output) = self.outputs.iter_mut().find(|o| o.name == name) else {
+                return;
+            };
+            let Some((width, height, scale)) =
+                output.background.as_ref().map(|b| (b.width, b.height, b.scale))
+            else {
+                return;
+            };
+            let Some(launchers) = output.launchers.as_mut() else {
+                return;
+            };
+            if !launchers.configured {
+                output.pending_launchers = Some(PendingFrame {
+                    pixmap: frame.pixmap.clone(),
+                    scale: frame.scale,
+                    input: frame.input.clone(),
+                });
+                return;
+            }
+            launchers.width = width;
+            launchers.height = height;
+            launchers.scale = scale;
+            output.pending_launchers = None;
+        }
+        let Some(index) = WaylandBackend::acquire_buffer(self, qh, target) else {
+            return;
+        };
+        let Some(compositor) = self.compositor.clone() else {
+            return;
+        };
+        let dragging = self.drag.is_some();
+        let Some(surface) = self.target_mut(target) else {
+            return;
+        };
+        let scale = surface.scale;
+        let (surface_w, surface_h) = (surface.width, surface.height);
+        for (i, other) in surface.buffers.iter_mut().enumerate() {
+            if i != index {
+                other.missed.extend(frame.damage.iter().copied());
+            }
+        }
+        let buffer = &mut surface.buffers[index];
+        let (bw, bh) = (buffer.width as usize, buffer.height as usize);
+        if frame.pixmap.width() as usize != bw || frame.pixmap.height() as usize != bh {
+            return;
+        }
+        let stride = bw * 4;
+        let src = frame.pixmap.data();
+        let mut to_copy: Vec<crate::geom::Rect> = std::mem::take(&mut buffer.missed);
+        to_copy.extend(frame.damage.iter().copied());
+        let whole_copy = to_copy.iter().any(|r| r.w >= surface_w && r.h >= surface_h) || to_copy.len() > 32;
+        if whole_copy {
+            super::copy_bgra(src, &mut buffer.map, stride, 0, 0, bw, bh);
+        } else {
+            for rect in &to_copy {
+                let r = rect
+                    .scaled(scale)
+                    .intersect(&crate::geom::Rect::new(0, 0, bw as i32, bh as i32));
+                if !r.is_empty() {
+                    super::copy_bgra(
+                        src,
+                        &mut buffer.map,
+                        stride,
+                        r.x as usize,
+                        r.y as usize,
+                        r.w as usize,
+                        r.h as usize,
+                    );
+                }
+            }
+        }
+        buffer.busy.store(true, Ordering::Release);
+
+        surface.input = frame.input.clone();
+        let buffer = &surface.buffers[index];
+        if !(dragging && matches!(target, Target::Launchers(_))) {
+            let region = compositor.create_region(qh, ());
+            for rect in &frame.input {
+                region.add(rect.x, rect.y, rect.w, rect.h);
+            }
+            surface.wl.set_input_region(Some(&region));
+            region.destroy();
+        }
+        surface.wl.set_buffer_scale(scale);
+        surface.wl.attach(Some(&buffer.buffer), 0, 0);
+        for rect in &frame.damage {
+            let r = rect.scaled(scale);
+            surface.wl.damage_buffer(r.x, r.y, r.w, r.h);
+        }
+        surface.wl.commit();
+        surface.mapped = true;
     }
 
     /// Mutable access to a surface by identifier.
@@ -375,9 +515,9 @@ impl State {
         );
         self.drag = Some(Drag { source, icon, uris });
         for output in &self.outputs {
-            if let Some(background) = &output.background {
-                background.wl.set_input_region(None);
-                background.wl.commit();
+            if let Some(launchers) = output.launchers.as_ref().filter(|s| s.mapped) {
+                launchers.wl.set_input_region(None);
+                launchers.wl.commit();
             }
         }
     }
@@ -395,14 +535,14 @@ impl State {
         }
         if let Some(compositor) = self.compositor.clone() {
             for output in &self.outputs {
-                if let Some(background) = &output.background {
+                if let Some(launchers) = output.launchers.as_ref().filter(|s| s.mapped) {
                     let region = compositor.create_region(qh, ());
-                    for rect in &background.input {
+                    for rect in &launchers.input {
                         region.add(rect.x, rect.y, rect.w, rect.h);
                     }
-                    background.wl.set_input_region(Some(&region));
+                    launchers.wl.set_input_region(Some(&region));
                     region.destroy();
-                    background.wl.commit();
+                    launchers.wl.commit();
                 }
             }
         }
@@ -470,11 +610,14 @@ impl State {
             output,
             scale: 1,
             background: None,
+            launchers: None,
+            pending_launchers: None,
         });
         self.create_background(qh, name);
     }
 
-    /// Creates the wallpaper layer surface of an output.
+    /// Creates the wallpaper layer surface of an output and the launchers
+    /// layer above it.
     fn create_background(&mut self, qh: &QueueHandle<State>, name: u32) {
         let (Some(compositor), Some(layer_shell)) = (self.compositor.clone(), self.layer_shell.clone())
         else {
@@ -515,6 +658,35 @@ impl State {
             mapped: false,
             input: Vec::new(),
         });
+        let wl = compositor.create_surface(qh, ());
+        let layer = layer_shell.get_layer_surface(
+            &wl,
+            Some(&output.output),
+            zwlr_layer_shell_v1::Layer::Bottom,
+            "desktop".to_string(),
+            qh,
+            LauncherLayer(name),
+        );
+        layer.set_anchor(
+            zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Bottom
+                | zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Right,
+        );
+        layer.set_size(0, 0);
+        layer.set_exclusive_zone(-1);
+        wl.commit();
+        output.launchers = Some(Surface {
+            wl,
+            role: Role::Layer(layer),
+            buffers: Vec::new(),
+            width: 0,
+            height: 0,
+            scale: output.scale,
+            configured: false,
+            mapped: false,
+            input: Vec::new(),
+        });
     }
 
     /// Forgets an output the compositor removed, with its wallpaper surface.
@@ -524,6 +696,9 @@ impl State {
         };
         let output = self.outputs.remove(index);
         if let Some(surface) = output.background {
+            surface.destroy();
+        }
+        if let Some(surface) = output.launchers {
             surface.destroy();
         }
         output.output.release();
@@ -788,9 +963,9 @@ impl WaylandBackend {
     }
 
     /// Finds or creates a free buffer of the surface's size.
-    fn acquire_buffer(state: &mut State, qh: &QueueHandle<State>, id: SurfaceId) -> Option<usize> {
+    fn acquire_buffer(state: &mut State, qh: &QueueHandle<State>, target: Target) -> Option<usize> {
         let shm = state.shm.clone()?;
-        let surface = state.surface_mut(id)?;
+        let surface = state.target_mut(target)?;
         let width = surface.width * surface.scale;
         let height = surface.height * surface.scale;
         if width < 1 || height < 1 || width > MAX_SURFACE_SIDE || height > MAX_SURFACE_SIDE {
@@ -1007,73 +1182,17 @@ impl Backend for WaylandBackend {
 
     fn present(&mut self, id: SurfaceId, frame: &Frame<'_>) {
         let qh = self.queue.handle();
-        let Some(index) = WaylandBackend::acquire_buffer(&mut self.state, &qh, id) else {
-            return;
-        };
-        let Some(compositor) = self.state.compositor.clone() else {
-            return;
-        };
-        let dragging = self.state.drag.is_some();
-        let Some(surface) = self.state.surface_mut(id) else {
-            return;
-        };
-        let scale = surface.scale;
-        let (surface_w, surface_h) = (surface.width, surface.height);
-        for (i, other) in surface.buffers.iter_mut().enumerate() {
-            if i != index {
-                other.missed.extend(frame.damage.iter().copied());
-            }
-        }
-        let buffer = &mut surface.buffers[index];
-        let (bw, bh) = (buffer.width as usize, buffer.height as usize);
-        if frame.pixmap.width() as usize != bw || frame.pixmap.height() as usize != bh {
-            return;
-        }
-        let stride = bw * 4;
-        let src = frame.pixmap.data();
-        let mut to_copy: Vec<crate::geom::Rect> = std::mem::take(&mut buffer.missed);
-        to_copy.extend(frame.damage.iter().copied());
-        let whole_copy = to_copy.iter().any(|r| r.w >= surface_w && r.h >= surface_h) || to_copy.len() > 32;
-        if whole_copy {
-            super::copy_bgra(src, &mut buffer.map, stride, 0, 0, bw, bh);
-        } else {
-            for rect in &to_copy {
-                let r = rect
-                    .scaled(scale)
-                    .intersect(&crate::geom::Rect::new(0, 0, bw as i32, bh as i32));
-                if !r.is_empty() {
-                    super::copy_bgra(
-                        src,
-                        &mut buffer.map,
-                        stride,
-                        r.x as usize,
-                        r.y as usize,
-                        r.w as usize,
-                        r.h as usize,
-                    );
-                }
-            }
-        }
-        buffer.busy.store(true, Ordering::Release);
+        self.state.present_target(&qh, Target::Surface(id), frame);
+    }
 
-        surface.input = frame.input.clone();
-        let buffer = &surface.buffers[index];
-        if !(dragging && matches!(id, SurfaceId::Background(_))) {
-            let region = compositor.create_region(&qh, ());
-            for rect in &frame.input {
-                region.add(rect.x, rect.y, rect.w, rect.h);
-            }
-            surface.wl.set_input_region(Some(&region));
-            region.destroy();
-        }
-        surface.wl.set_buffer_scale(scale);
-        surface.wl.attach(Some(&buffer.buffer), 0, 0);
-        for rect in &frame.damage {
-            let r = rect.scaled(scale);
-            surface.wl.damage_buffer(r.x, r.y, r.w, r.h);
-        }
-        surface.wl.commit();
-        surface.mapped = true;
+    fn layered_desktop(&self) -> bool {
+        true
+    }
+
+    fn present_launchers(&mut self, background: u32, frame: &Frame<'_>) {
+        let qh = self.queue.handle();
+        self.state
+            .present_target(&qh, Target::Launchers(background), frame);
     }
 
     fn perform(&mut self, request: &Request) {
@@ -1516,6 +1635,62 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, SurfaceId> for State {
                     surface.configured = surface.width > 0 && surface.height > 0;
                 }
                 state.emit_configured(*id);
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.events.push(Event::Quit);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LauncherLayer> for State {
+    fn event(
+        state: &mut Self,
+        layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        data: &LauncherLayer,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                layer.ack_configure(serial);
+                let (width, height) = (width as i32, height as i32);
+                let Some(output) = state.outputs.iter_mut().find(|o| o.name == data.0) else {
+                    return;
+                };
+                if let Some(surface) = output.launchers.as_mut() {
+                    if width > 0 {
+                        surface.width = width.min(MAX_SURFACE_SIDE);
+                    }
+                    if height > 0 {
+                        surface.height = height.min(MAX_SURFACE_SIDE);
+                    }
+                    surface.configured = surface.width > 0 && surface.height > 0;
+                }
+                if let Some(pending) = output.pending_launchers.take() {
+                    let scale = pending.scale.max(1);
+                    let whole = Rect::new(
+                        0,
+                        0,
+                        pending.pixmap.width() as i32 / scale,
+                        pending.pixmap.height() as i32 / scale,
+                    );
+                    let frame = Frame {
+                        pixmap: &pending.pixmap,
+                        scale: pending.scale,
+                        damage: vec![whole],
+                        input: pending.input.clone(),
+                        visible: pending.input.clone(),
+                        grab: false,
+                    };
+                    state.present_target(qh, Target::Launchers(data.0), &frame);
+                }
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 state.events.push(Event::Quit);
